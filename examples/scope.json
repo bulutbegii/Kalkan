@@ -1,0 +1,19 @@
+{
+  "name": "Örnek Yetkili Test - Lab",
+  "authorized_by": "Yetkili Test Sorumlusu (kendi laboratuvarı)",
+  "ticket": "LAB-2026-001",
+  "expires": "2027-12-31T23:59:59Z",
+  "allow_cidrs": [
+    "127.0.0.1/32",
+    "10.10.10.0/24"
+  ],
+  "allow_domains": [
+    "example.com",
+    "localhost"
+  ],
+  "allow_ports": [80, 443, 8080, 8443, 11434],
+  "deny_cidrs": [
+    "10.10.10.1/32"
+  ],
+  "max_risk": "intrusive"
+}

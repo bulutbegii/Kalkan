@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Kalkan çalışma çıktıları
+.kalkan/
+*.rc
+scope.json
+scope.local.json
+
+# Editör
+.vscode/
+.idea/
+
+# Eski oturum artığı (diskte kalsın, repoya girmesin)
+test_output.txt
+
+# Önceki oturumdan kalan tek seferlik geliştirme scriptleri (projeye dahil değil)
+/add_vuln.py
+/check_ollama*.py
+/fix_*.py
+docs/MIMARI.md
+docs/KULLANIM.md
+docs/YOL_HARITASI.md
