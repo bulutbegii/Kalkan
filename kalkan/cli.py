@@ -472,6 +472,205 @@ def cmd_run(args) -> int:
     return exit_code
 
 
+def _chat_shim(base: dict[str, Any], text: str):
+    """chat turu icin _augment_from_feed/_build_plans'in bekledigi args shim'i."""
+    import types
+    ns = types.SimpleNamespace(
+        text=text,
+        from_feed=base["from_feed"],
+        feed_min_score=base["feed_min_score"],
+        max_risk=base["max_risk"],
+        module=base.get("module"),
+        payload=None, mode=None,
+        endpoint=base["endpoint"], model=base["model"],
+        arg=list(base.get("arg", [])),
+    )
+    return ns
+
+
+def cmd_chat(args) -> int:
+    """Etkilesimli sohbet (REPL): NL yaz -> niyet -> plan -> kapilar -> sonuc.
+
+    Risk modeli (b): passive/active OTOMATIK calisir; intrusive/destructive
+    satir-ici onay ister. Model asla serbest komut uretmez; yalnizca
+    katalogdan teknik secer, calistiran deterministik planlayicidir.
+    """
+    import types
+
+    router = Router(endpoint=args.endpoint, model=args.model)
+    model_name, warn = router.resolve_model()
+    if warn:
+        print(f"uyari: {warn}", file=sys.stderr)
+    online = router.available()
+
+    guard = _scope_guard(args)
+    policy = Policy(allow_intrusive=args.allow_intrusive, allow_destructive=args.allow_destructive)
+    audit = AuditLog(args.audit)
+    registry = load_default_registry()
+
+    state = {"target": args.target or "", "auto": False}
+
+    def approver(action: Action) -> bool:
+        if state["auto"]:
+            print(f"    [auto] onaylandi: {action.describe()}")
+            return True
+        print(f"\n  ! onay gerekiyor: {action.describe()}")
+        if action.technique:
+            print(f"    teknik : {action.technique}")
+        if action.args:
+            print(f"    argüman: {json.dumps(action.args, ensure_ascii=False)}")
+        try:
+            ans = input("  onaylıyor musun? [y/N] ").strip().lower()
+        except EOFError:
+            return False
+        return ans in ("y", "yes", "e", "evet")
+
+    executor = Executor(
+        scope=guard, policy=policy, audit=audit, registry=registry,
+        approver=approver, dry_run=args.dry_run, timeout=args.timeout,
+    )
+
+    base = {
+        "from_feed": args.from_feed, "feed_min_score": args.feed_min_score,
+        "max_risk": args.max_risk, "endpoint": args.endpoint, "model": args.model,
+        "arg": [],
+    }
+
+    def run_plan(plan: Plan) -> None:
+        _print_plan(plan, False)
+        if not plan.actions:
+            return
+        try:
+            results = executor.run(plan)
+        except ScopeViolation as exc:
+            print(f"  KAPSAM İHLALİ: {exc}", file=sys.stderr)
+            return
+        except PolicyDenied as exc:
+            print(f"  POLİTİKA REDDİ: {exc}", file=sys.stderr)
+            return
+        print()
+        for r in results:
+            print(f"  {r.summary()}")
+            if r.status == "dry-run":
+                print(f"    {r.detail}")
+            elif r.detail:
+                print(f"    - {r.detail}")
+            if r.parsed:
+                prev = json.dumps(r.parsed, ensure_ascii=False)
+                print(f"    - {prev[:400]}{'...' if len(prev) > 400 else ''}")
+
+    def make_plan(text: str, extra_args: list[str] | None = None) -> Plan | None:
+        shim = _chat_shim(base, text)
+        if extra_args:
+            shim.arg = list(extra_args)
+        print(f"  ... model düşünüyor ({model_name})" if online else "  ... kural tabanlı eşleştirme")
+        intent = router.route(text)
+        targets = intent.targets or ((state["target"],) if state["target"] else ())
+        if not targets:
+            print("  hedef yok. '/target <host>' ile belirle ya da metinde hedef ver.")
+            return None
+        intent = Intent(
+            objective=intent.objective or text, targets=targets,
+            techniques=intent.techniques, rationale=intent.rationale,
+            source=intent.source, notes=intent.notes,
+        )
+        intent = _augment_from_feed(shim, intent)
+        if not intent.techniques:
+            print("  model katalogdan teknik seçemedi. Daha açık yaz (örn. 'port tara', 'web zafiyet').")
+            for n in intent.notes:
+                print(f"  not: {n}")
+            return None
+        plans = _build_plans(shim, intent)
+        return plans[0] if plans else None
+
+    print("Kalkan sohbet — çıkış: /quit, yardım: /help")
+    print(f"  model   : {model_name} ({'çevrimiçi' if online else 'çevrimdışı → kural tabanlı yedek'})")
+    print(f"  hedef   : {state['target'] or '(ayarlı değil — /target ile belirle)'}")
+    print(f"  risk    : passive/active otomatik · intrusive/destructive ONAYLI"
+          f"{' · dry-run' if args.dry_run else ''}")
+    print(f"  kapsam  : {args.scope}   denetim: {args.audit}")
+
+    while True:
+        try:
+            line = input(f"\nkalkan({state['target'] or '-'})> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\ngörüşürüz.")
+            return 0
+        if not line:
+            continue
+
+        if line.startswith("/"):
+            parts = line[1:].split(maxsplit=1)
+            cmd = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if cmd in ("quit", "exit", "q"):
+                print("görüşürüz.")
+                return 0
+            if cmd in ("help", "?", "h"):
+                print("  /target [host]   oturum hedefini göster/ayarla")
+                print("  /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
+                print("  /auto [on|off]   intrusive onayını atla (dikkat)")
+                print("  /plan <metin>    sadece planla, çalıştırma")
+                print("  /feed [tail|status]  son besleme olayları")
+                print("  /scope           kapsam dosyası")
+                print("  /quit            çık")
+                print("  (bunların dışında yazdığın her şey modele niyet olarak gider)")
+                continue
+            if cmd == "target":
+                if rest:
+                    state["target"] = rest
+                    print(f"  hedef = {rest}")
+                else:
+                    print(f"  hedef = {state['target'] or '(ayarlı değil)'}")
+                continue
+            if cmd == "risk":
+                try:
+                    base["max_risk"] = Risk.parse(rest).label
+                    print(f"  tavan risk = {base['max_risk']}")
+                except (ValueError, AttributeError):
+                    print("  geçersiz. passive|active|intrusive|destructive")
+                continue
+            if cmd == "auto":
+                state["auto"] = rest.lower() in ("on", "1", "evet", "aç")
+                print(f"  auto-onay = {'AÇIK (intrusive sormadan çalışır)' if state['auto'] else 'kapalı'}")
+                continue
+            if cmd == "scope":
+                print(f"  kapsam dosyası: {args.scope}  (ayrıntı: kalkan scope show)")
+                continue
+            if cmd == "feed":
+                from .feeds import JsonlSink
+                sub = rest.lower() or "tail"
+                if sub.startswith("stat"):
+                    from .feeds import FeedDaemon
+                    st = FeedDaemon().status().get("store", {})
+                    print(f"  CVE deposu: {st.get('cve_count', 0)} "
+                          f"(KEV {st.get('kev_in_store', 0)}, kritik {st.get('critical', 0)})")
+                else:
+                    for e in JsonlSink().tail(limit=8):
+                        mark = "!" if e.kind == "cve.kev" else ("*" if e.kind == "cve.critical" else " ")
+                        print(f"  {mark} {e.kind:<15} {e.id or e.source:<16} {e.title[:60]}")
+                continue
+            if cmd == "plan":
+                if not rest:
+                    print("  kullanım: /plan <metin>")
+                    continue
+                p = make_plan(rest)
+                if p:
+                    _print_plan(p, False)
+                continue
+            print(f"  bilinmeyen komut: /{cmd}  (/help)")
+            continue
+
+        try:
+            plan = make_plan(line)
+            if plan:
+                run_plan(plan)
+        except Exception as exc:  # noqa: BLE001 - bir tur hatasi oturumu dusurmesin
+            print(f"  hata: {exc}", file=sys.stderr)
+
+    return 0
+
+
 def cmd_audit(args) -> int:
     audit = AuditLog(args.audit)
     if args.action == "verify":
@@ -873,6 +1072,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_feed.add_argument("--limit", type=int, default=20, help="tail: olay sayisi")
     p_feed.add_argument("--json", action="store_true")
     p_feed.set_defaults(func=cmd_feed)
+
+    p_chat = sub.add_parser("chat", help="modelle sohbet ederek planla/çalıştır (REPL)")
+    p_chat.add_argument("--target", default="", help="oturum hedefi (sonra /target ile değişir)")
+    p_chat.add_argument("--from-feed", action="store_true", help="canlı CVE beslemesini öneriye kat")
+    p_chat.add_argument("--feed-min-score", type=float, default=40.0)
+    p_chat.add_argument("--max-risk", default="intrusive",
+                        choices=["passive", "active", "intrusive", "destructive"])
+    p_chat.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    p_chat.add_argument("--model", default=DEFAULT_MODEL)
+    p_chat.add_argument("--timeout", type=int, default=300)
+    p_chat.add_argument("--dry-run", action="store_true", help="komutları üret, çalıştırma")
+    p_chat.add_argument("--allow-intrusive", action="store_true", default=True)
+    p_chat.add_argument("--allow-destructive", action="store_true")
+    p_chat.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
+    p_chat.add_argument("--audit", default=argparse.SUPPRESS, help="denetim kaydı (global --audit'i ezer)")
+    p_chat.set_defaults(func=cmd_chat)
 
     p_router = sub.add_parser("router", help="modelin niyet çıkarımını gör")
     p_router.add_argument("text")

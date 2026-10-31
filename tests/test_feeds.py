@@ -144,6 +144,20 @@ class TestSuggestMsfSqli(unittest.TestCase):
         self.assertTrue(any(s.cve == "CVE-2024-9001" for s in sqli))
 
 
+class TestChatShim(unittest.TestCase):
+    def test_shim_has_build_plan_attrs(self):
+        from kalkan.cli import _chat_shim
+        base = {"from_feed": True, "feed_min_score": 55.0, "max_risk": "active",
+                "endpoint": "http://x", "model": "m", "arg": ["verify=1"]}
+        ns = _chat_shim(base, "example.com port tara")
+        for attr in ("text", "from_feed", "feed_min_score", "max_risk",
+                     "module", "payload", "mode", "endpoint", "model", "arg"):
+            self.assertTrue(hasattr(ns, attr), f"eksik alan: {attr}")
+        self.assertEqual(ns.text, "example.com port tara")
+        self.assertEqual(ns.arg, ["verify=1"])
+        self.assertIsNone(ns.module)
+
+
 class TestNucleiCveId(unittest.TestCase):
     def _cmd(self, args):
         from kalkan.adapters.nuclei import NucleiAdapter
