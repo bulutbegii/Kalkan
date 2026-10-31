@@ -95,6 +95,8 @@ _KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("web", "uygulama", "teknoloji", "parmak izi", "fingerprint", "tech"), "T1592"),
     (("zafiyet", "vuln", "cve", "zayıflık"), "T1595.002"),
     (("exploit", "sömür", "istismar", "msf", "metasploit"), "T1190"),
+    (("idor", "bola", "erişim kontrol", "erisim kontrol", "access control",
+      "yetkisiz", "nesne referans", "broken access"), "T1190"),
     (("shodan", "pasif", "osint", "dışarıdan"), "T1596"),
     (("jailbreak", "prompt injection", "enjeksiyon"), "AML.T0051"),
     (("jailbreak", "kır", "bypass", "kandır"), "AML.T0054"),

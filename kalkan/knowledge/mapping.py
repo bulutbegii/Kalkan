@@ -234,6 +234,16 @@ _PLAYBOOKS: tuple[Playbook, ...] = (
                 note="--arg verify=1 ile açılır",
             ),
             Step(
+                "idor_probe",
+                "webprobe",
+                Risk.INTRUSIVE,
+                {"verify": None, "range": 3},
+                required=("verify",),
+                accepts=("verify", "param", "id", "ids", "range", "cookie", "cookie_b", "insecure"),
+                note="--arg verify=1 ile açılır; nesne kimliğini (id) numaralandırıp "
+                     "yetkisiz erişimi dener (IDOR/BOLA). İki oturum: cookie=... cookie_b=...",
+            ),
+            Step(
                 "exploit_check",
                 "msf",
                 Risk.INTRUSIVE,

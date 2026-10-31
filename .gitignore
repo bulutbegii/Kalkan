@@ -24,6 +24,10 @@ reports/
 .vscode/
 .idea/
 
+# graphify kod-grafı çıktısı (üretilmiş artefakt; repoya girmesin)
+graphify-out/
+kalkan-coverage.json
+
 # Eski oturum artığı (diskte kalsın, repoya girmesin)
 test_output.txt
 

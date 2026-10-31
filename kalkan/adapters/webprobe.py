@@ -11,6 +11,7 @@ Yetkinlikler:
   http_methods      -> OPTIONS Allow, TRACE acigi
   tls_inspect       -> sertifika/surum/sona erme
   redirect_check    -> acik yonlendirme
+  idor_probe        -> nesne kimligi numaralandirma (IDOR/BOLA, kirik erisim kontrolu)
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ SECURITY_HEADERS = {
 }
 
 PROBE_ORIGIN = "https://kalkan.invalid"
+_IDOR_NOAUTH = "__noauth__"
 REDIRECT_PAYLOADS = (
     "https://kalkan.invalid/redirect",
     "//kalkan.invalid/redirect",
@@ -85,10 +87,11 @@ class WebProbeAdapter(Adapter):
             "http_methods",
             "tls_inspect",
             "redirect_check",
+            "idor_probe",
         ),
         risk=Risk.ACTIVE,
         binary=None,
-        description="Yerleşik HTTP/TLS denetimleri (başlık, CORS, çerez, yöntem, sertifika)",
+        description="Yerleşik HTTP/TLS denetimleri (başlık, CORS, çerez, yöntem, sertifika, IDOR)",
     )
 
     def command(self, action: Action) -> list[str]:
@@ -99,6 +102,7 @@ class WebProbeAdapter(Adapter):
             "http_methods": "OPTIONS+TRACE",
             "tls_inspect": "TLS",
             "redirect_check": "GET",
+            "idor_probe": "GET(enum)",
         }.get(action.capability, "GET")
         return [verb, action.target]
 
@@ -156,6 +160,7 @@ class WebProbeAdapter(Adapter):
             "http_methods": self._methods,
             "tls_inspect": self._tls,
             "redirect_check": self._redirect,
+            "idor_probe": self._idor,
         }.get(action.capability)
         if handler is None:
             return ActionResult(action=action, status="error", detail="bilinmeyen yetenek")
@@ -541,6 +546,151 @@ class WebProbeAdapter(Adapter):
             "url": target,
             "param": param,
             "target_host": target_host,
+            "tested": tested,
+            "findings": findings,
+        }
+
+    def _idor(self, action: Action) -> dict[str, Any]:
+        """Nesne referansi (id) numaralandirarak yetkisiz erisimi dener.
+
+        Uc sinyal uretir:
+          * idor_enumeration  : komsu kimlikler (id±N) oturumumuza 200 donuyor
+                                -> baska kullanicinin nesnesine erisim (yatay IDOR)
+          * missing_authentication : cerezsiz istek de ayni nesneyi 200 donuyor
+                                -> kimlik dogrulama zorlanmiyor
+          * bola_horizontal   : ikinci oturum (cookie_b) A kullanicisinin nesnesini
+                                okuyor -> dogrulanmis BOLA (en guvenilir kanit)
+
+        Hedef URL sayisal bir kimlik icermeli (yol parcasi veya sorgu degeri);
+        param=<ad> ile hangi sorgu parametresinin kimlik oldugu verilebilir.
+        """
+        args = action.args
+        insecure = bool(args.get("insecure"))
+        cookie = str(args.get("cookie") or "")
+        cookie_b = str(args.get("cookie_b") or args.get("cookie2") or "")
+        param = str(args.get("param") or "").strip()
+        url = action.target if "://" in action.target else "http://" + action.target
+        parts = urlsplit(url)
+        query = parse_qsl(parts.query, keep_blank_values=True)
+
+        loc: tuple[str, Any] | None = None
+        cur_id = str(args.get("id") or "")
+        if param:
+            for k, v in query:
+                if k == param:
+                    loc, cur_id = ("query", param), (cur_id or v)
+                    break
+        if loc is None:
+            for k, v in query:
+                if v.isdigit():
+                    loc, cur_id, param = ("query", k), (cur_id or v), k
+                    break
+        if loc is None:
+            segs = parts.path.split("/")
+            for i in range(len(segs) - 1, -1, -1):
+                if segs[i].isdigit():
+                    loc, cur_id = ("path", i), (cur_id or segs[i])
+                    break
+        if loc is None:
+            return {"url": url, "findings": [],
+                    "note": "nesne kimliği bulunamadı; --arg param=<ad> ver "
+                            "ya da sayısal kimlikli bir URL kullan (örn. /users/1001)"}
+
+        explicit = [s.strip() for s in str(args.get("ids") or "").split(",") if s.strip()]
+        if explicit:
+            candidates = explicit
+        else:
+            rng = int(args.get("range", 3) or 3)
+            cand: list[str] = []
+            try:
+                base = int(cur_id)
+            except ValueError:
+                base = None
+            if base is not None:
+                for d in range(1, rng + 1):
+                    cand += [str(base + d), str(base - d)]
+                cand += ["1", str(base + 100)]
+            candidates = [
+                c for c in dict.fromkeys(cand)
+                if c and c != str(cur_id) and not (c.lstrip("-").isdigit() and int(c) < 0)
+            ]
+        candidates = candidates[:8]
+
+        def build(idv: str) -> str:
+            if loc[0] == "query":
+                newq = [(k, (idv if k == loc[1] else v)) for k, v in query]
+                return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                                   urlencode(newq), parts.fragment))
+            segs = parts.path.split("/")
+            segs[loc[1]] = idv
+            return urlunsplit((parts.scheme, parts.netloc, "/".join(segs),
+                               parts.query, parts.fragment))
+
+        def fetch(idv: str, use_cookie: str) -> HttpResponse:
+            hdrs = {"Cookie": use_cookie} if (use_cookie and use_cookie != _IDOR_NOAUTH) else {}
+            return self._request(build(idv), headers=hdrs, insecure=insecure)
+
+        def similar(a: int, b: int) -> bool:
+            hi = max(a, b)
+            return hi == 0 or abs(a - b) / hi < 0.3
+
+        baseline = fetch(str(cur_id), cookie)
+        base_len = len(baseline.body)
+        findings: list[dict[str, Any]] = []
+        tested: list[dict[str, Any]] = [
+            {"id": str(cur_id), "role": "baseline", "status": baseline.status, "len": base_len}
+        ]
+        param_label = param if loc[0] == "query" else f"path[{loc[1]}]"
+
+        for idv in candidates:
+            r = fetch(idv, cookie)
+            tested.append({"id": idv, "role": "enum", "status": r.status, "len": len(r.body),
+                           "error": r.error})
+            if r.error or r.status != 200 or not r.body:
+                continue
+            distinct = (not similar(len(r.body), base_len)) or (r.body != baseline.body)
+            findings.append({
+                "check": "idor_enumeration",
+                "parameter": param_label,
+                "severity": "high" if distinct else "medium",
+                "detail": f"kimlik {idv} HTTP 200 döndü — başka nesneye erişim "
+                          + ("(farklı içerik)" if distinct else "(aynı içerik)"),
+                "id": idv,
+            })
+
+        if cookie:
+            r = fetch(str(cur_id), _IDOR_NOAUTH)
+            tested.append({"id": f"{cur_id} (noauth)", "role": "unauth",
+                           "status": r.status, "len": len(r.body)})
+            if not r.error and r.status == 200 and similar(len(r.body), base_len):
+                findings.append({
+                    "check": "missing_authentication",
+                    "parameter": param_label,
+                    "severity": "high",
+                    "detail": "çerezsiz (kimlik doğrulamasız) istek de aynı nesneyi 200 döndürdü",
+                    "id": str(cur_id),
+                })
+
+        if cookie_b:
+            r = fetch(str(cur_id), cookie_b)
+            tested.append({"id": f"{cur_id} (userB)", "role": "bola",
+                           "status": r.status, "len": len(r.body)})
+            if not r.error and r.status == 200 and similar(len(r.body), base_len):
+                findings.append({
+                    "check": "bola_horizontal",
+                    "parameter": param_label,
+                    "severity": "critical",
+                    "detail": "ikinci oturum (B) birinci kullanıcının (A) nesnesini okudu "
+                              "— doğrulanmış BOLA/IDOR",
+                    "id": str(cur_id),
+                })
+
+        return {
+            "url": url,
+            "param": param_label,
+            "object_id": cur_id,
+            "baseline_status": baseline.status,
+            "vulnerable": any(f["severity"] in ("high", "critical") for f in findings),
             "tested": tested,
             "findings": findings,
         }

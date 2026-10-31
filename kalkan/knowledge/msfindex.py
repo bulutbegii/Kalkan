@@ -43,7 +43,9 @@ def _read_metadata_raw() -> str | None:
             try:
                 r = subprocess.run(
                     ["wsl", "-d", distro, "-e", "sh", "-lc", f"cat {path} 2>/dev/null"],
-                    capture_output=True, text=True, timeout=90, env=_WSL_ENV,
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=90, env=_WSL_ENV,
                 )
                 if r.returncode == 0 and r.stdout.strip().startswith("{"):
                     return r.stdout
@@ -84,11 +86,11 @@ def _build_from_raw(raw: str) -> dict[str, list[str]]:
     """Ham metadata JSON'dan CVE -> [modul yolu] indeksi kur (exploit once)."""
     data = json.loads(raw)
     index: dict[str, list[str]] = {}
-    for fullname, meta in data.items():
+    for key, meta in data.items():
         if not isinstance(meta, dict):
             continue
         mtype = meta.get("type", "")
-        path = fullname if "/" in fullname else f"{mtype}/{fullname}"
+        path = meta.get("fullname") or (key if "/" in key else f"{mtype}/{key}")
         is_exploit = mtype == "exploit" or path.startswith("exploit/")
         for cve in _parse_references(meta):
             bucket = index.setdefault(cve, [])

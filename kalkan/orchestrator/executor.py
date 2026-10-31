@@ -99,54 +99,69 @@ class Executor:
             if on_event:
                 on_event("start", idx, total, action, None)
             try:
-                action = self._materialize(action)
-            except UnresolvedArgument as exc:
-                denied = ActionResult(action=action, status="denied", detail=str(exc))
-                results.append(denied)
-                self.audit.append("action.denied", action=action.key(), reason=str(exc))
+                try:
+                    action = self._materialize(action)
+                except UnresolvedArgument as exc:
+                    denied = ActionResult(action=action, status="denied", detail=str(exc))
+                    results.append(denied)
+                    self.audit.append("action.denied", action=action.key(), reason=str(exc))
+                    if on_event:
+                        on_event("done", idx, total, action, denied)
+                    continue
+
+                try:
+                    self.scope.check(action.target, risk=action.risk)
+                except ScopeViolation as exc:
+                    self.audit.append("scope.violation", action=action.key(), target=action.target, reason=str(exc))
+                    raise
+
+                try:
+                    self.policy.check(action, self.approver)
+                except PolicyDenied as exc:
+                    self.audit.append("policy.denied", action=action.key(), reason=str(exc))
+                    raise
+
+                self.audit.append(
+                    "action.start",
+                    action=action.key(),
+                    target=action.target,
+                    risk=action.risk.label,
+                    technique=action.technique,
+                    args=action.args,
+                )
+
+                adapter = self.registry.get(action.tool)
+                if self.dry_run:
+                    command = adapter.dry_run(action)
+                    result = ActionResult(action=action, status="dry-run", detail=command)
+                else:
+                    result = adapter.run(action, timeout=self.timeout)
+
+                self.audit.append(
+                    "action.result",
+                    action=action.key(),
+                    status=result.status,
+                    duration_s=round(result.duration_s, 3),
+                    detail=result.detail,
+                )
+                results.append(result)
+                self._absorb(result)
                 if on_event:
-                    on_event("done", idx, total, action, denied)
-                continue
-
-            try:
-                self.scope.check(action.target, risk=action.risk)
-            except ScopeViolation as exc:
-                self.audit.append("scope.violation", action=action.key(), target=action.target, reason=str(exc))
-                raise
-
-            try:
-                self.policy.check(action, self.approver)
-            except PolicyDenied as exc:
-                self.audit.append("policy.denied", action=action.key(), reason=str(exc))
-                raise
-
-            self.audit.append(
-                "action.start",
-                action=action.key(),
-                target=action.target,
-                risk=action.risk.label,
-                technique=action.technique,
-                args=action.args,
-            )
-
-            adapter = self.registry.get(action.tool)
-            if self.dry_run:
-                command = adapter.dry_run(action)
-                result = ActionResult(action=action, status="dry-run", detail=command)
-            else:
-                result = adapter.run(action, timeout=self.timeout)
-
-            self.audit.append(
-                "action.result",
-                action=action.key(),
-                status=result.status,
-                duration_s=round(result.duration_s, 3),
-                detail=result.detail,
-            )
-            results.append(result)
-            self._absorb(result)
-            if on_event:
-                on_event("done", idx, total, action, result)
+                    on_event("done", idx, total, action, result)
+            except KeyboardInterrupt:
+                aborted = ActionResult(
+                    action=action, status="aborted",
+                    detail="kullanıcı durdurdu (Ctrl+C)",
+                )
+                results.append(aborted)
+                self.audit.append("action.aborted", action=action.key())
+                if on_event:
+                    on_event("done", idx, total, action, aborted)
+                remaining = total - idx
+                self.audit.append(
+                    "plan.aborted", done=idx, remaining=remaining, target=plan.target,
+                )
+                return results
 
         self.audit.append("plan.finish", results=len(results), target=plan.target)
         return results

@@ -10,8 +10,9 @@ from typing import Any
 
 from . import __version__, correlate, ui
 from .adapters import load_default_registry
+from .adapters._common import host_of
 from .audit import AuditLog
-from .knowledge import atlas, mapping
+from .knowledge import atlas, bridge, mapping
 from .knowledge.attack import AttackKnowledge
 from .models import Action, Intent, Plan, Risk
 from .orchestrator import (
@@ -249,6 +250,55 @@ def _build_plans(args, intent: Intent) -> list[Plan]:
     return plan_for_intent(intent, registry, max_risk, overrides)
 
 
+def _resolve_msf_module(ident: str) -> tuple[str, str] | None:
+    """Bir tanimi MSF moduluNE cozumle.
+
+    - 'CVE-....'  -> kurasyonlu tablo, yoksa kurulu msf katalog indeksi
+    - 'exploit/...' / 'auxiliary/...' (icinde '/') -> dogrudan modul yolu
+    - digeri -> None (cozumlenemedi)
+    Doner: (modul_yolu, kisa_not) ya da None.
+    """
+    s = (ident or "").strip()
+    if not s:
+        return None
+    if s.upper().startswith("CVE-"):
+        return bridge.msf_module(s)
+    if "/" in s:
+        return (s, "doğrudan modül")
+    return None
+
+
+def _exploit_plan(
+    target: str,
+    module: str,
+    note: str = "",
+    mode: str = "check",
+    options: dict[str, Any] | None = None,
+) -> Plan:
+    """CVE/modul icin msf-odakli plan uret: exploit_check (+ mode=run ise
+    exploit_run). Tum kapilar (scope/policy/onay) Executor'da uygulanir;
+    bu fonksiyon yalnizca aksiyonlari olusturur. msf RHOSTS host ister,
+    bu yuzden URL verilirse host'a indirilir."""
+    options = dict(options or {})
+    rhost = host_of(target)
+    base_args: dict[str, Any] = {"module": module, **options}
+    rationale = f"CVE→MSF doğrulama: {note}" if note else "MSF modül doğrulama (check)"
+    actions = [
+        Action(tool="msf", capability="exploit_check", target=rhost,
+               args=dict(base_args), risk=Risk.INTRUSIVE, technique="T1190",
+               rationale=rationale),
+    ]
+    if mode == "run":
+        run_args = dict(base_args)
+        run_args["mode"] = "run"
+        actions.append(
+            Action(tool="msf", capability="exploit_run", target=rhost,
+                   args=run_args, risk=Risk.DESTRUCTIVE, technique="T1190",
+                   rationale="GERÇEK exploit: başarırsa oturum açar"),
+        )
+    return Plan(objective=f"exploit {module}", target=rhost, actions=actions)
+
+
 def cmd_scope(args) -> int:
     if args.action == "add":
         if not args.target:
@@ -333,6 +383,31 @@ def cmd_coverage(args) -> int:
     print(f"\nATLAS: {len(auto)} teknik otomatik test edilebilir, {len(manual)} manuel.")
     for tech in manual:
         print(f"  - {tech.id} {tech.name} (manuel): {tech.test_approach}")
+    return 0
+
+
+def cmd_navigator(args) -> int:
+    """ATT&CK Navigator layer üret: Kalkan otomasyon kapsamını matris üzerine boya.
+
+    attack-navigator'dan destekle tüm ATT&CK tekniklerini (veri seti indirilmişse)
+    layer'a koyar; kapsananlar risk rengiyle, kalanlar gri işaretlenir."""
+    from .knowledge import navigator
+    layer, stats = navigator.build_layer(
+        domain=getattr(args, "domain", "enterprise"),
+        include_all=not getattr(args, "covered_only", False),
+        name=getattr(args, "name", "Kalkan Coverage"),
+        cache_dir=getattr(args, "cache_root", None),
+    )
+    out = Path(getattr(args, "out", "kalkan-coverage.json"))
+    out.write_text(json.dumps(layer, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Navigator layer yazıldı: {ui.bold(str(out))}")
+    print(f"  kapsanan ATT&CK tekniği : {stats['covered']} (çalıştırılabilir playbook)")
+    if stats.get("all"):
+        print(f"  matris toplam tekniği   : {stats['all']} (kapsanmayanlar gri)")
+    else:
+        print(f"  {ui.grey('tüm matrisi boyamak için: kalkan knowledge fetch → sonra tekrar çalıştır')}")
+    print(f"  yükle: https://mitre-attack.github.io/attack-navigator/  →  "
+          f"Open Existing Layer → Upload from local")
     return 0
 
 
@@ -559,6 +634,50 @@ def cmd_run(args) -> int:
     return exit_code
 
 
+def cmd_exploit(args) -> int:
+    """CVE/modülü hedefe karşı doğrula (check) veya exploit et (run) — tek komut.
+
+    Tespitle kalmayan akışın komut satırı karşılığı: scope + policy + onay
+    kapılarından geçer; mode=run için --allow-destructive ve scope tavanı
+    destructive olmalıdır."""
+    resolved = _resolve_msf_module(args.ident)
+    if not resolved:
+        print(f"'{args.ident}' için MSF modülü çözümlenemedi "
+              f"(CVE kurasyonlu tablo/katalog eşleşmedi; doğrudan modül için tam yol verin)",
+              file=sys.stderr)
+        return 2
+    module, note = resolved
+    opts: dict[str, Any] = {}
+    for key in ("payload", "lhost", "lport", "rport", "post"):
+        val = getattr(args, key, None)
+        if val:
+            opts[key] = val
+    plan = _exploit_plan(args.target, module, note=note, mode=args.mode, options=opts)
+
+    guard = _scope_guard(args)
+    policy = Policy(allow_intrusive=True, allow_destructive=args.allow_destructive)
+    audit = AuditLog(args.audit)
+    registry = load_default_registry()
+    executor = Executor(
+        scope=guard, policy=policy, audit=audit, registry=registry,
+        approver=_approver(args), dry_run=args.dry_run, timeout=args.timeout,
+    )
+    _print_plan(plan, False)
+    print(f"\n  modül: {ui.cyan(module)} ({note})  mod={ui.risk('destructive' if args.mode == 'run' else 'intrusive')}")
+    print()
+    try:
+        results = executor.run(plan, on_event=_progress_event)
+    except ScopeViolation as exc:
+        print(f"\n{ui.red('KAPSAM İHLALİ')}: {exc}", file=sys.stderr)
+        return 2
+    except PolicyDenied as exc:
+        print(f"\n{ui.red('POLİTİKA REDDİ')}: {exc}", file=sys.stderr)
+        return 2
+    print(f"\n  {ui.grey('denetim kaydı:')} {args.audit}")
+    bad = [r for r in results if r.status in ("error", "denied", "aborted", "unavailable")]
+    return 1 if bad else 0
+
+
 def _chat_shim(base: dict[str, Any], text: str):
     """chat turu icin _augment_from_feed/_build_plans'in bekledigi args shim'i."""
     import types
@@ -597,7 +716,8 @@ def cmd_chat(args) -> int:
 
     state = {"target": args.target or "", "auto": True,
              "summary": not getattr(args, "no_summary", False),
-             "no_report": getattr(args, "no_report", False)}
+             "no_report": getattr(args, "no_report", False),
+             "last_exploit": None}
 
     def approver(action: Action) -> bool:
         if state["auto"]:
@@ -703,6 +823,10 @@ def cmd_chat(args) -> int:
         except PolicyDenied as exc:
             print(f"  {ui.red('POLİTİKA REDDİ')}: {exc}", file=sys.stderr)
             return
+        if any(r.status == "aborted" for r in results):
+            print(f"\n  {ui.yellow(ui.SYM['warn'] + ' durduruldu')} — prompt'a dönülüyor"
+                  f" {ui.dim('(denetim kaydına yazıldı)')}")
+            return
         ozet = ""
         if state["summary"] and online:
             print(ui.dim("\n  ... özet hazırlanıyor"))
@@ -711,6 +835,11 @@ def cmd_chat(args) -> int:
                 print("  🗒  " + ozet.replace("\n", "\n      "))
         kor = correlate.correlate(results) if not args.dry_run else []
         _print_correlation(kor)
+        for c in kor:
+            if c.get("msf_module"):
+                state["last_exploit"] = {"cve": c["cve"], "module": c["msf_module"]}
+                print(ui.dim(f"    → /exploit {c['cve']}  ile bu modülü (check) deneyebilirsin"))
+                break
         if not state.get("no_report") and not args.dry_run:
             from . import report
             try:
@@ -748,12 +877,117 @@ def cmd_chat(args) -> int:
         plans = _build_plans(shim, intent)
         return plans[0] if plans else None
 
+    def handle_exploit(rest: str) -> None:
+        """CVE/modul -> msf exploit_check (+ 'run' ile exploit_run). Tespitle
+        kalma: bulunan zafiyeti dogrula, yetki varsa somur."""
+        if not state["target"]:
+            print("  önce hedef ver: /target <host>  (msf RHOSTS buna göre kurulur)")
+            return
+        mode = "check"
+        toks: list[str] = []
+        for tok in rest.split():
+            if tok.lower() == "run":
+                mode = "run"
+            else:
+                toks.append(tok)
+        ident = toks[0] if toks else ""
+        opts: dict[str, Any] = {}
+        for kv in toks[1:]:
+            if "=" in kv:
+                k, v = kv.split("=", 1)
+                opts[k.strip()] = v.strip()
+            else:
+                print(f"  yok sayıldı (key=value bekleniyor): {kv}")
+        note = ""
+        if not ident:
+            le = state.get("last_exploit")
+            if not le:
+                print("  kullanım: /exploit <CVE-...|exploit/modül/yolu> [k=v...] [run]")
+                print("  örnek   : /exploit CVE-2017-0144         (sadece doğrula)")
+                print("            /exploit CVE-2017-0144 run lhost=10.10.10.5")
+                print("  not     : tarama bir MSF'li CVE bulursa argümansız /exploit onu dener")
+                return
+            ident, module, note = le["cve"], le["module"], "son korelasyon"
+        else:
+            resolved = _resolve_msf_module(ident)
+            if not resolved:
+                print(f"  '{ident}' için MSF modülü çözümlenemedi.")
+                print("  - CVE ise: kurasyonlu tabloda ve msf kataloğunda eşleşme yok")
+                print("  - doğrudan modül için tam yol yaz (örn. exploit/windows/smb/ms17_010_eternalblue)")
+                return
+            module, note = resolved
+        if mode == "run":
+            if not executor.policy.allow_destructive:
+                print(f"  {ui.yellow(ui.SYM['warn'])} mode=run DESTRUCTIVE. Önce: {ui.bold('/allow destructive on')}")
+                return
+            if executor.scope._max_risk < Risk.DESTRUCTIVE:
+                print(f"  {ui.yellow(ui.SYM['warn'])} kapsam tavanı destructive değil; gerçek exploit "
+                      f"KAPSAM İHLALİ verir.\n    scope dosyasında max_risk=\"destructive\" yap.")
+                return
+        plan = _exploit_plan(state["target"], module, note=note, mode=mode, options=opts)
+        tag = ui.risk("destructive" if mode == "run" else "intrusive")
+        print(f"  modül: {ui.cyan(module)} {ui.dim('(' + note + ')') if note else ''}  [{tag}]")
+        run_plan(plan, f"exploit {ident} ({module})")
+
+    def handle_cve(rest: str) -> None:
+        """CVE'yi incele: skor/KEV/CWE + ATT&CK köprüsü + varsa MSF modülü.
+        Bulunan modülü /exploit için hatırlar (tespitten saldırıya köprü)."""
+        cid = rest.strip().upper()
+        if not cid:
+            print("  kullanım: /cve CVE-2017-0144")
+            return
+        from .knowledge import vuln
+        rec = vuln.VulnStore().get(cid)
+        if rec:
+            kev = ui.red(" KEV") if getattr(rec, "kev", False) else ""
+            print(f"  {ui.bold(cid)}  skor {rec.score():.1f} ({rec.tier()}){kev}")
+            if rec.cwe:
+                print(f"    CWE: {', '.join(rec.cwe[:4])}")
+        else:
+            print(f"  {ui.bold(cid)}  (yerel CVE deposunda yok; MSF yine de denenir)")
+        module = bridge.msf_module(cid)
+        if module:
+            state["last_exploit"] = {"cve": cid, "module": module[0]}
+            print(f"    MSF modülü: {ui.cyan(module[0])} {ui.dim('(' + module[1] + ')')}")
+            print(f"    → {ui.bold('/exploit ' + cid)} (doğrula) · "
+                  f"{ui.bold('/exploit ' + cid + ' run')} (gerçek exploit)")
+        else:
+            print("    MSF modülü: yok (otomatik exploit adayı değil)")
+        if rec:
+            info = bridge.enrich(rec)
+            if info.get("techniques"):
+                tids = ", ".join(t["technique"] for t in info["techniques"][:5])
+                print(f"    teknik köprüsü: {tids}")
+            if info.get("sqli"):
+                print("    SQLi sınıfı: sqlmap için /arm (verify=1)")
+
+    def handle_allow(rest: str) -> None:
+        """Oturum içinde politika kapısını aç/kapat (intrusive|destructive)."""
+        parts = rest.lower().split()
+        if not parts:
+            print(f"  intrusive={executor.policy.allow_intrusive}  "
+                  f"destructive={executor.policy.allow_destructive}")
+            print("  kullanım: /allow destructive on|off  ·  /allow intrusive on|off")
+            return
+        on = (parts[1] if len(parts) > 1 else "on") in ("on", "1", "evet", "aç", "ac")
+        if parts[0].startswith("destr"):
+            executor.policy.allow_destructive = on
+            print(f"  destructive = {ui.red('AÇIK') if on else 'kapalı'}")
+            if on and executor.scope._max_risk < Risk.DESTRUCTIVE:
+                print(f"  {ui.yellow(ui.SYM['warn'])} scope max_risk destructive değil; "
+                      f"gerçek exploit yine engellenir. scope.json → max_risk=\"destructive\".")
+        elif parts[0].startswith("intr"):
+            executor.policy.allow_intrusive = on
+            print(f"  intrusive = {'AÇIK' if on else 'kapalı'}")
+        else:
+            print("  bilinmeyen: /allow destructive|intrusive [on|off]")
+
     print()
     print(ui.rule())
     print(ui.banner(__version__, model_name, online, Path(args.scope).exists()))
     print(ui.rule())
-    print(f"  {ui.grey('çıkış')} /quit    {ui.grey('yardım')} /help    "
-          f"{ui.grey('silahla')} /arm · /arg")
+    print(f"  {ui.grey('çıkış')} /quit (Ctrl+D)    {ui.grey('durdur')} Ctrl+C    "
+          f"{ui.grey('yardım')} /help    {ui.grey('saldırı')} /cve · /exploit")
     print(f"  {ui.grey('hedef')} : {ui.bold(state['target']) if state['target'] else ui.grey('(ayarlı değil — /target ile belirle)')}")
     onay = (ui.yellow('OTOMATIK — intrusive sormadan çalışır (/auto off ile kapat)')
             if state['auto'] else 'intrusive/destructive ONAY ister')
@@ -761,12 +995,21 @@ def cmd_chat(args) -> int:
     print(f"  {ui.grey('özet')}  : {ui.green('açık') if state['summary'] and online else ui.grey('kapalı')}")
     print(f"  {ui.grey('kapsam')}: {args.scope}   {ui.grey('denetim')}: {args.audit}")
 
+    interrupted = False
     while True:
         try:
             line = input(f"\n{ui.cyan('kalkan')}({ui.bold(state['target'] or '-')})> ").strip()
-        except (EOFError, KeyboardInterrupt):
+        except EOFError:
             print("\ngörüşürüz.")
             return 0
+        except KeyboardInterrupt:
+            if interrupted:
+                print("\ngörüşürüz.")
+                return 0
+            interrupted = True
+            print(f"\n  {ui.dim('(iptal — çıkmak için /quit ya da tekrar Ctrl+C)')}")
+            continue
+        interrupted = False
         if not line:
             continue
 
@@ -778,16 +1021,23 @@ def cmd_chat(args) -> int:
                 print("görüşürüz.")
                 return 0
             if cmd in ("help", "?", "h"):
-                print("  /target [host]   oturum hedefini göster/ayarla")
-                print("  /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
-                print("  /auto [on|off]   intrusive onayını atla (dikkat)")
-                print("  /arg k=v ...     adım argümanı silahla (örn. verify=1, module=...)")
-                print("  /arm             kısayol: verify=1 (sqlmap+dalfox'u açar)")
-                print("  /ozet [on|off]   her turdan sonra Türkçe model özeti")
-                print("  /plan <metin>    sadece planla, çalıştırma")
-                print("  /feed [tail|status]  son besleme olayları")
-                print("  /scope [add <h>] kapsamı göster / hedef ekle")
-                print("  /quit            çık")
+                print("  akış:")
+                print("    /target [host]   oturum hedefini göster/ayarla")
+                print("    /plan <metin>    sadece planla, çalıştırma")
+                print("    Ctrl+C           çalışan taramayı durdur (prompt'a döner)")
+                print("    /quit · Ctrl+D   çık")
+                print("  saldırı (tespitle kalma):")
+                print("    /cve <CVE-id>    CVE'yi incele: skor/KEV/CWE + MSF modülü")
+                print("    /exploit <CVE|modül> [k=v...] [run]  doğrula (check) / exploit_run")
+                print("    /allow destructive on   gerçek exploit (run) için politikayı aç")
+                print("  ayar:")
+                print("    /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
+                print("    /auto [on|off]   intrusive onayını atla (dikkat)")
+                print("    /arg k=v ...     adım argümanı silahla (örn. verify=1, module=...)")
+                print("    /arm             kısayol: verify=1 (sqlmap+dalfox'u açar)")
+                print("    /ozet [on|off]   her turdan sonra Türkçe model özeti")
+                print("    /feed [tail|status]  son besleme olayları")
+                print("    /scope [add <h>] kapsamı göster / hedef ekle")
                 print("  (bunların dışında yazdığın her şey modele niyet olarak gider)")
                 continue
             if cmd == "target":
@@ -884,6 +1134,15 @@ def cmd_chat(args) -> int:
                 if p:
                     _print_plan(p, False)
                 continue
+            if cmd in ("exploit", "saldiri", "attack"):
+                handle_exploit(rest)
+                continue
+            if cmd in ("cve", "vuln"):
+                handle_cve(rest)
+                continue
+            if cmd == "allow":
+                handle_allow(rest)
+                continue
             print(f"  bilinmeyen komut: /{cmd}  (/help)")
             continue
 
@@ -913,6 +1172,7 @@ def _home_ns(base: dict[str, Any], **over):
         atlas_interval=None, days=None, no_kev=False, no_epss=False,
         stdout=False, webhook="", from_start=False, kind=[], min_tier="", limit=20,
         query="", search_query=None, domain="enterprise", force=False, cache_root=None,
+        out="kalkan-coverage.json", covered_only=False, name="Kalkan Coverage",
     )
     d.update(over)
     return types.SimpleNamespace(**d)
@@ -952,6 +1212,7 @@ def cmd_home(args) -> int:
         ("5", "Canlı besleme", "CVE/ATT&CK akışı: durum · son olaylar · başlat"),
         ("6", "Araçlar & kapsama", "Kurulu araçlar ve teknik kapsama durumu"),
         ("7", "Bilgi tabanı", "ATT&CK / ATLAS teknik arama"),
+        ("n", "ATT&CK haritası", "Navigator layer üret (Kalkan kapsama)"),
         ("h", "Yardım", "Bu menüyü açıklar"),
         ("q", "Çıkış", ""),
     ]
@@ -1012,6 +1273,9 @@ def cmd_home(args) -> int:
                 dom = _ask("  domain [enterprise/mobile/ics/atlas] (boş=enterprise): ") or "enterprise"
                 q = _ask("  arama: ")
                 cmd_knowledge(_home_ns(base, action="search", search_query=q, domain=dom))
+            elif choice == "n":
+                out = _ask("  çıktı dosyası [kalkan-coverage.json]: ") or "kalkan-coverage.json"
+                cmd_navigator(_home_ns(base, out=out))
             else:
                 print("  geçersiz seçim. [h] yardım")
         except SystemExit as exc:
@@ -1441,7 +1705,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--dry-run", action="store_true", help="komutları üret, çalıştırma")
     p_chat.add_argument("--no-summary", action="store_true", help="tur sonu Türkçe model özetini kapat")
     p_chat.add_argument("--no-report", action="store_true", help="tarama sonrası .md rapor yazımını kapat")
-    p_chat.add_argument("--allow-intrusive", action="store_true", default=True)
+    p_chat.add_argument("--allow-intrusive", action="store_true")
     p_chat.add_argument("--allow-destructive", action="store_true")
     p_chat.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
     p_chat.add_argument("--audit", default=argparse.SUPPRESS, help="denetim kaydı (global --audit'i ezer)")
@@ -1487,6 +1751,37 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--allow-destructive", action="store_true")
         p.set_defaults(func=func)
 
+    p_nav = sub.add_parser("navigator", help="ATT&CK Navigator layer üret (Kalkan kapsama haritası)")
+    p_nav.add_argument("--out", default="kalkan-coverage.json", help="çıktı JSON yolu")
+    p_nav.add_argument("--domain", default="enterprise", choices=["enterprise", "mobile", "ics"])
+    p_nav.add_argument("--covered-only", action="store_true", help="yalnızca playbook'u olan teknikleri yaz")
+    p_nav.add_argument("--name", default="Kalkan Coverage", help="layer adı")
+    p_nav.add_argument("--cache-root", default=None, help="ATT&CK önbellek dizini")
+    p_nav.set_defaults(func=cmd_navigator)
+
+    p_exploit = sub.add_parser(
+        "exploit",
+        help="CVE/modülü hedefe karşı doğrula (check) veya exploit et (run)",
+    )
+    p_exploit.add_argument("target", help="hedef host/IP (kapsam içinde olmalı)")
+    p_exploit.add_argument("ident", help="CVE kimliği (CVE-2017-0144) ya da msf modül yolu (exploit/...)")
+    p_exploit.add_argument("--mode", choices=["check", "run"], default="check",
+                           help="check=doğrula (INTRUSIVE, varsayılan); run=gerçek exploit (DESTRUCTIVE)")
+    p_exploit.add_argument("--payload", default=None, help="msf payload (run için)")
+    p_exploit.add_argument("--lhost", default=None, help="geri bağlantı adresi (reverse payload)")
+    p_exploit.add_argument("--lport", default=None)
+    p_exploit.add_argument("--rport", default=None)
+    p_exploit.add_argument("--post", default=None,
+                           help="oturum sonrası keşif komutları (örn. 'sysinfo;getuid')")
+    p_exploit.add_argument("--timeout", type=int, default=600)
+    p_exploit.add_argument("--yes", action="store_true", help="onay sormadan geç (dikkat)")
+    p_exploit.add_argument("--dry-run", action="store_true", help="komutu üret, çalıştırma")
+    p_exploit.add_argument("--allow-intrusive", action="store_true", default=True)
+    p_exploit.add_argument("--allow-destructive", action="store_true", help="mode=run için zorunlu")
+    p_exploit.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
+    p_exploit.add_argument("--audit", default=argparse.SUPPRESS, help="denetim kaydı (global --audit'i ezer)")
+    p_exploit.set_defaults(func=cmd_exploit)
+
     p_audit = sub.add_parser("audit", help="denetim kaydını doğrula/göster")
     p_audit.add_argument("action", choices=["verify", "tail"], nargs="?", default="verify")
     p_audit.add_argument("--count", type=int, default=10)
@@ -1507,7 +1802,7 @@ def _setup_console() -> None:
 
 _KNOWN_COMMANDS = {
     "scope", "tools", "coverage", "knowledge", "vuln", "feed",
-    "home", "chat", "router", "plan", "run", "audit",
+    "home", "chat", "router", "plan", "run", "audit", "exploit", "navigator",
 }
 _GLOBAL_VALUE_OPTS = {"--scope", "--audit"}
 

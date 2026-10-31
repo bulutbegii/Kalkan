@@ -120,10 +120,11 @@ _STATUS_STYLE = {
     "denied": ("byellow",),
     "error": ("bred", "bold"),
     "skipped": ("grey",),
+    "aborted": ("byellow", "bold"),
 }
 _STATUS_SYM = {
     "ok": "ok", "dry-run": "arrow", "unavailable": "skip",
-    "denied": "warn", "error": "fail", "skipped": "skip",
+    "denied": "warn", "error": "fail", "skipped": "skip", "aborted": "warn",
 }
 
 

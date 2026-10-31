@@ -54,6 +54,7 @@ class MetasploitAdapter(Adapter):
     @staticmethod
     def _wsl(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
         return subprocess.run(["wsl", *args], capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
                               timeout=timeout, env=_WSL_ENV)
 
     def _runner(self) -> str:
