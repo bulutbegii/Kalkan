@@ -341,6 +341,10 @@ def cmd_knowledge(args) -> int:
     if args.action == "fetch":
         path = knowledge.fetch(force=args.force)
         print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+        st = knowledge.statistics()
+        print(f"içerik    : {st['techniques']} teknik (+{st['sub_techniques']} alt teknik), "
+              f"{st['tactics']} taktik, {st['mitigations']} mitigasyon, "
+              f"{st['procedures']} prosedür örneği")
         return 0
 
     if args.action == "search":
@@ -359,21 +363,44 @@ def cmd_knowledge(args) -> int:
         print(f"teknik bulunamadı: {args.technique}", file=sys.stderr)
         return 2
 
-    print(f"{info['id']}  {info['name']}")
+    print(f"{info['id']}  {info['name']}" + ("  [alt-teknik]" if info.get("is_subtechnique") else ""))
     print(f"taktikler : {', '.join(info['tactics'])}")
     print(f"platformlar: {', '.join(info['platforms'])}")
+    if info.get("parent"):
+        print(f"üst teknik: {info['parent']}")
+    if info.get("sub_techniques"):
+        print(f"alt teknikler: {', '.join(info['sub_techniques'])}")
+    if info.get("data_sources"):
+        print(f"veri kaynakları: {', '.join(info['data_sources'][:12])}")
+    if info.get("permissions"):
+        print(f"gerekli izin: {', '.join(info['permissions'])}")
+    if info.get("defenses_bypassed"):
+        print(f"aşılan savunma: {', '.join(info['defenses_bypassed'][:10])}")
     print(f"url       : {info['url']}")
     if info["description"]:
-        print(f"\naçıklama  : {info['description'][:1200].strip()}")
+        print(f"\nnasıl yapılır (açıklama):\n{info['description'][:1600].strip()}")
     if info["detection"]:
-        print(f"\ntespit    : {info['detection'][:800]}")
+        print(f"\ntespit    :\n{info['detection'][:900].strip()}")
+    mitig = info.get("mitigations") or []
+    if mitig:
+        print(f"\nmitigasyonlar ({len(mitig)}):")
+        for m in mitig[:12]:
+            print(f"  - {m['id']:<8} {m['name']}")
+    procs = info.get("procedures") or []
+    if procs:
+        print(f"\nprosedür örnekleri — gerçekte nasıl kullanılmış ({len(procs)}):")
+        for p in procs[:8]:
+            desc = (p.get("description") or "").replace("\n", " ")[:160]
+            print(f"  - [{p['type']}] {p['source']}: {desc}")
+        if len(procs) > 8:
+            print(f"  (+{len(procs) - 8} örnek daha)")
     playbook = mapping.get(info["id"])
     if playbook:
-        print(f"\nplaybook  : {playbook.name} ({len(playbook.steps)} adım)")
+        print(f"\nplaybook  : {playbook.name} ({len(playbook.steps)} adım) — Kalkan otomatik çalıştırır")
         for step in playbook.steps:
             print(f"  - {step.tool}.{step.capability} [{step.risk.label}]")
     else:
-        print("\nplaybook  : yok (manuel)")
+        print("\nplaybook  : yok (yalnızca bilgi/referans; otomasyon yok)")
     return 0
 
 
