@@ -679,6 +679,8 @@ def cmd_chat(args) -> int:
                 print("  /target [host]   oturum hedefini göster/ayarla")
                 print("  /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
                 print("  /auto [on|off]   intrusive onayını atla (dikkat)")
+                print("  /arg k=v ...     adım argümanı silahla (örn. verify=1, module=...)")
+                print("  /arm             kısayol: verify=1 (sqlmap+dalfox'u açar)")
                 print("  /ozet [on|off]   her turdan sonra Türkçe model özeti")
                 print("  /plan <metin>    sadece planla, çalıştırma")
                 print("  /feed [tail|status]  son besleme olayları")
@@ -703,6 +705,35 @@ def cmd_chat(args) -> int:
             if cmd == "auto":
                 state["auto"] = rest.lower() in ("on", "1", "evet", "aç")
                 print(f"  auto-onay = {'AÇIK (intrusive sormadan çalışır)' if state['auto'] else 'kapalı'}")
+                continue
+            if cmd in ("arg", "arm"):
+                if cmd == "arm" and not rest:
+                    rest = "verify=1"
+                if not rest:
+                    cur = base.get("arg") or []
+                    print(f"  aktif arg: {', '.join(cur) if cur else '(yok)'}")
+                    print("  kullanım: /arg key=value [key=value...]  ·  /arg clear")
+                    continue
+                if rest.strip().lower() == "clear":
+                    base["arg"] = []
+                    print("  argümanlar temizlendi (adımlar yeniden kilitli)")
+                    continue
+                bad = [tok for tok in rest.split() if "=" not in tok]
+                if bad:
+                    print(f"  geçersiz (key=value bekleniyor): {', '.join(bad)}")
+                    continue
+                merged = dict(tok.split("=", 1) for tok in (base.get("arg") or []))
+                for tok in rest.split():
+                    k, v = tok.split("=", 1)
+                    merged[k.strip()] = v.strip()
+                base["arg"] = [f"{k}={v}" for k, v in merged.items()]
+                print(f"  aktif arg: {', '.join(base['arg'])}")
+                if "verify" in merged:
+                    print("    → sqli_check (sqlmap) + xss_scan (dalfox) SİLAHLI "
+                          "[INTRUSIVE · her çalıştırmada onay sorar]")
+                if "module" in merged:
+                    print("    → exploit_check (msf) SİLAHLI [INTRUSIVE · mode=check]."
+                          " Gerçek exploit için: mode=run + başlatırken --allow-destructive")
                 continue
             if cmd in ("ozet", "özet"):
                 if rest:
