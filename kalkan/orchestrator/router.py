@@ -78,6 +78,8 @@ KATALOG:
 
 _KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("port", "tara", "scan", "servis", "servisler"), "T1046"),
+    (("web", "http", "https", "uygulama", "site", "başlık", "header", "cms"), "T1190"),
+    (("web", "uygulama", "teknoloji", "parmak izi", "fingerprint", "tech"), "T1592"),
     (("zafiyet", "vuln", "cve", "zayıflık"), "T1595.002"),
     (("exploit", "sömür", "istismar", "msf", "metasploit"), "T1190"),
     (("shodan", "pasif", "osint", "dışarıdan"), "T1596"),

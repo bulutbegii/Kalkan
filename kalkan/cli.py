@@ -795,6 +795,7 @@ def cmd_home(args) -> int:
         ("1", "Sohbet (chat)", "Modelle konuşarak planla/çalıştır — ana kullanım"),
         ("2", "Plan üret", "Tek istek → plan göster (çalıştırmaz)"),
         ("3", "Çalıştır", "Tek istek → planı kapılardan geçirip yürüt"),
+        ("w", "Web uygulama taraması", "httpx + wafw00f + webprobe + nuclei (deterministik)"),
         ("4", "Kapsam (scope)", "İzinli hedefleri göster / yeni hedef ekle"),
         ("5", "Canlı besleme", "CVE/ATT&CK akışı: durum · son olaylar · başlat"),
         ("6", "Araçlar & kapsama", "Kurulu araçlar ve teknik kapsama durumu"),
@@ -833,6 +834,11 @@ def cmd_home(args) -> int:
                 req = _ask("  ne yapılsın? (örn. port tara, web zafiyet): ")
                 ns = _home_ns(base, target=tgt, text=req)
                 (cmd_plan if choice == "2" else cmd_run)(ns)
+            elif choice == "w":
+                tgt = _ask("  web hedefi (örn. https://site veya alan adı): ")
+                if not tgt:
+                    print("  hedef gerekli."); continue
+                cmd_run(_home_ns(base, target=tgt, technique=["T1592", "T1190"]))
             elif choice == "4":
                 print("  [g] göster   [e] hedef ekle")
                 s = _ask("  seçim: ").lower()
