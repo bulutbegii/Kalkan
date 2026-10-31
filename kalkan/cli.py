@@ -618,6 +618,10 @@ def cmd_chat(args) -> int:
                 params = p.get("parameters") or []
                 extra = f" (parametre: {', '.join(map(str, params[:5]))})" if params else ""
                 lines.append(f"    GECILEBILIR: zafiyet DOGRULANDI{extra}")
+            if p.get("session_count"):
+                lines.append(f"    ERISIM SAGLANDI: {p['session_count']} oturum acildi")
+            if p.get("dumped"):
+                lines.append("    VERI CEKILDI: veritabani icerigi loot olarak kaydedildi")
             if p.get("known_vulns"):
                 lines.append(f"    bilinen CVE: {', '.join(p['known_vulns'][:8])}")
             findings = p.get("findings") or []

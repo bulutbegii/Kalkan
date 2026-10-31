@@ -71,7 +71,8 @@ def _discoveries(results: Iterable[ActionResult]) -> list[str]:
 
 def render(target: str, objective: str, actions: list[Action],
            results: list[ActionResult], notes: list[str] | None = None,
-           summary: str = "", scope: str = "", when: datetime | None = None) -> str:
+           summary: str = "", scope: str = "", when: datetime | None = None,
+           loot: list[dict[str, Any]] | None = None) -> str:
     when = when or datetime.now()
     lines = [
         "# Kalkan Tarama Raporu",
@@ -109,6 +110,17 @@ def render(target: str, objective: str, actions: list[Action],
     if disc:
         lines += ["## Keşifler", "", *disc, ""]
 
+    if loot:
+        lines += ["## Loot / Elde Edilen Veri", ""]
+        for item in loot:
+            lines.append(f"### {item['label']}")
+            lines.append(f"- **Dosya:** `{item['path']}`")
+            snippet = (item.get("snippet") or "").strip()
+            if snippet:
+                lines += ["", "```", snippet, "```", ""]
+            else:
+                lines.append("")
+
     if summary:
         lines += ["## Özet", "", summary, ""]
 
@@ -119,18 +131,50 @@ def render(target: str, objective: str, actions: list[Action],
     return "\n".join(lines)
 
 
+def _persist_loot(results: list[ActionResult], target: str, out_dir: Path,
+                  stamp: str) -> list[dict[str, Any]]:
+    """Adaptorlerin dondurdugu ham loot'u (sqlmap dump, msf oturum ciktisi)
+    reports/loot/<hedef>_<zaman>/ altina yaz; rapora eklenecek ozeti dondur."""
+    loot: list[dict[str, Any]] = []
+    loot_dir: Path | None = None
+    for r in results:
+        p = r.parsed or {}
+        text = p.get("loot_text")
+        if not text or not str(text).strip():
+            continue
+        if loot_dir is None:
+            loot_dir = out_dir / "loot" / f"{_slug(target)}_{stamp}"
+            loot_dir.mkdir(parents=True, exist_ok=True)
+        name = p.get("loot_name") or f"{r.action.tool}_{r.action.capability}"
+        fpath = loot_dir / f"{_slug(name)}.txt"
+        try:
+            fpath.write_text(str(text), encoding="utf-8")
+        except OSError:
+            continue
+        loot.append({
+            "label": f"{r.action.tool}.{r.action.capability}",
+            "path": str(fpath),
+            "snippet": str(text)[:1500],
+        })
+    return loot
+
+
 def write_report(plan: Plan, results: list[ActionResult], *, summary: str = "",
                  scope: str = "", out_dir: str | Path = DEFAULT_DIR,
                  when: datetime | None = None) -> Path:
-    """Raporu reports/<hedef>_<zaman>.md olarak yaz ve yolunu döndür."""
+    """Raporu reports/<hedef>_<zaman>.md olarak yaz ve yolunu döndür.
+    Gercek istismar ciktilari (loot) ayrica reports/loot/ altina kaydedilir."""
     when = when or datetime.now()
+    directory = Path(out_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = when.strftime("%Y%m%d-%H%M%S")
+    loot = _persist_loot(results, plan.target, directory, stamp)
     md = render(
         target=plan.target, objective=plan.objective, actions=plan.actions,
         results=results, notes=plan.notes, summary=summary, scope=scope, when=when,
+        loot=loot,
     )
-    directory = Path(out_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    fname = f"{_slug(plan.target)}_{when.strftime('%Y%m%d-%H%M%S')}.md"
+    fname = f"{_slug(plan.target)}_{stamp}.md"
     path = directory / fname
     path.write_text(md, encoding="utf-8")
     return path

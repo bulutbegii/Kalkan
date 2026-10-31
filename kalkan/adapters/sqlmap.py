@@ -27,10 +27,10 @@ _TECH_RE = re.compile(r"Type:\s*(?P<type>[^\n]+)", re.IGNORECASE)
 class SqlmapAdapter(Adapter):
     spec = ToolSpec(
         name="sqlmap",
-        capabilities=("sqli_check",),
+        capabilities=("sqli_check", "sqli_dump"),
         risk=Risk.INTRUSIVE,
         binary="sqlmap",
-        description="SQL enjeksiyonu tespiti (varsayilan: yalnizca dogrulama, veri cekmez)",
+        description="SQL enjeksiyonu: dogrulama (check) ve kontrollu veri cekme (dump)",
     )
 
     def __init__(self) -> None:
@@ -80,6 +80,15 @@ class SqlmapAdapter(Adapter):
             cmd += ["--crawl", str(args["crawl"])]
         if args.get("random_agent", True):
             cmd += ["--random-agent"]
+        if action.capability == "sqli_dump" or args.get("dump"):
+            if args.get("db"):
+                cmd += ["-D", str(args["db"])]
+            if args.get("tables"):
+                cmd += ["-T", str(args["tables"])]
+            if args.get("columns"):
+                cmd += ["-C", str(args["columns"])]
+            cmd += ["--dump"]
+            cmd += ["--stop", str(args.get("stop", 200))]
         return cmd
 
     def parse(self, stdout: str, action: Action) -> dict[str, Any]:
@@ -111,11 +120,17 @@ class SqlmapAdapter(Adapter):
             }
             for item in unique
         ]
-        return {
+        dumping = action.capability == "sqli_dump" or bool(action.args.get("dump"))
+        out: dict[str, Any] = {
             "vulnerable": vulnerable,
             "dbms": dbms_match.group("dbms").strip() if dbms_match else "",
             "parameters": unique,
             "findings": findings,
             "count": len(findings),
-            "note": "veri cekme kapali; yalnizca dogrulama yapildi",
+            "note": "veri cekildi (--dump)" if dumping else "veri cekme kapali; yalnizca dogrulama yapildi",
         }
+        if dumping and text.strip():
+            out["dumped"] = "Database:" in text or "[*] dumped" in text.lower() or "entries" in text.lower()
+            out["loot_text"] = text
+            out["loot_name"] = "sqlmap_dump"
+        return out
