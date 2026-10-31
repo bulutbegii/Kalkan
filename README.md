@@ -212,6 +212,34 @@ python -m kalkan.cli run --dry-run --yes --technique AML.T0054 `
 > `llmprobe` adaptörünün `endpoint`, `model`, `api` (`ollama` | `openai`), `canary`, `system`
 > argümanları vardır. OpenAI uyumlu sunucu için plan üretirken `args` üzerinden `api: openai` geçilmelidir.
 
+### Bilgi tabanını güncellemek (ATT&CK + ATLAS)
+
+Kalkan iki bilgi tabanını da **resmi STIX dağıtımlarından** besler; API anahtarı gerekmez:
+
+```powershell
+# ATT&CK enterprise (~55 MB): tum teknikler, aciklama + tespit notlariyla
+python -m kalkan.cli knowledge fetch
+python -m kalkan.cli knowledge show --technique T1046
+python -m kalkan.cli knowledge search -q "port scan"
+
+# ATLAS tam katalog (~1.6 MB): teknik + mitigation + case study
+python -m kalkan.cli knowledge fetch --domain atlas
+python -m kalkan.cli knowledge show --domain atlas --technique AML.T0051
+python -m kalkan.cli knowledge search -q "jailbreak" --domain atlas
+
+# kuretilmis test-edilebilir cekirdek (cok kucuk, ag parcaksi, cevrimdisi)
+python -m kalkan.cli knowledge atlas
+```
+
+- Kaynak: `mitre-attack/attack-stix-data` ve `mitre-atlas/atlas-data` GitHub depoları (resmi).
+- Önbellek: `~/.kalkan/attack/` ve `~/.kalkan/atlas/`; `--force` ile yeniden indirir.
+- `knowledge show --domain atlas` çıktısında tekniğin açıklaması, tüm
+  mitigasyonları (AML.M…), onu kullanan case study'ler ve kuretilmiş
+  çekirdeğdeki test yöntemi gösterilir.
+- Diğer ATT&CK domain'leri: `--domain mobile`, `--domain ics`.
+- Arama boşlukla ayrılan kelimeleri VE olarak değerlendirir; isim
+  eşleşmeleri önce, açıklama eşleşmeleri sonra gelir.
+
 ---
 
 ## 7. Modeli orkestratör olarak bağlamak

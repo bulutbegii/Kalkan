@@ -206,11 +206,7 @@ def cmd_coverage(args) -> int:
 
 
 def cmd_knowledge(args) -> int:
-    if args.action == "fetch":
-        knowledge = AttackKnowledge(domain=args.domain)
-        path = knowledge.fetch(force=args.force)
-        print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
-        return 0
+    query = args.search_query if args.search_query else args.query
 
     if args.action == "atlas":
         for tech in atlas.ATLAS.values():
@@ -218,9 +214,78 @@ def cmd_knowledge(args) -> int:
             print(f"{tech.id:<10} {tech.tactic:<16} {mode:<9} {tech.name}")
         return 0
 
+    cache_root = getattr(args, "cache_root", None)
+    domain = getattr(args, "domain", "enterprise")
+
+    if domain == "atlas":
+        return _knowledge_atlas(args, query, cache_root)
+
+    knowledge = AttackKnowledge(domain=domain, cache_dir=cache_root)
+
+    if args.action == "fetch":
+        path = knowledge.fetch(force=args.force)
+        print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+        return 0
+
     if args.action == "search":
-        for info in knowledge.search(args.query):
+        if not query:
+            print("sorgu bos: knowledge search \"kelime\"", file=sys.stderr)
+            return 2
+        hits = knowledge.search(query)
+        if not hits:
+            print("sonuc yok", file=sys.stderr)
+        for info in hits:
             print(f"{info['id']:<10} {info['name']}  ({', '.join(info['tactics'])})")
+        return 0
+
+    info = knowledge.technique(args.technique)
+    if not info:
+        print(f"teknik bulunamadı: {args.technique}", file=sys.stderr)
+        return 2
+
+    print(f"{info['id']}  {info['name']}")
+    print(f"taktikler : {', '.join(info['tactics'])}")
+    print(f"platformlar: {', '.join(info['platforms'])}")
+    print(f"url       : {info['url']}")
+    if info["description"]:
+        print(f"\naçıklama  : {info['description'][:1200].strip()}")
+    if info["detection"]:
+        print(f"\ntespit    : {info['detection'][:800]}")
+    playbook = mapping.get(info["id"])
+    if playbook:
+        print(f"\nplaybook  : {playbook.name} ({len(playbook.steps)} adım)")
+        for step in playbook.steps:
+            print(f"  - {step.tool}.{step.capability} [{step.risk.label}]")
+    else:
+        print("\nplaybook  : yok (manuel)")
+    return 0
+
+
+def _knowledge_atlas(args, query: str, cache_root: str | None) -> int:
+    knowledge = atlas.AtlasKnowledge(cache_dir=cache_root)
+
+    if args.action == "fetch":
+        path = knowledge.fetch(force=args.force)
+        stats = knowledge.statistics()
+        print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+        print(
+            f"içerik    : {stats['tactics']} taktik, {stats['techniques']} teknik "
+            f"(+{stats['sub_techniques']} alt teknik), "
+            f"{stats['mitigations']} mitigation, {stats['case_studies']} case study"
+        )
+        return 0
+
+    if args.action == "search":
+        if not query:
+            print('sorgu bos: knowledge search --domain atlas "kelime"', file=sys.stderr)
+            return 2
+        hits = knowledge.search(query)
+        if not hits:
+            print("sonuc yok", file=sys.stderr)
+        for info in hits:
+            tactics = ", ".join(info["tactics"]) or "-"
+            seed = " [test-edilebilir]" if info["in_seed"] else ""
+            print(f"{info['id']:<12} {info['name']}{seed}  ({tactics})")
         return 0
 
     info = knowledge.technique(args.technique)
@@ -231,15 +296,27 @@ def cmd_knowledge(args) -> int:
     print(f"taktikler : {', '.join(info['tactics'])}")
     print(f"platformlar: {', '.join(info['platforms'])}")
     print(f"url       : {info['url']}")
-    if info["detection"]:
-        print(f"\ntespit    : {info['detection'][:800]}")
-    playbook = mapping.get(info["id"])
-    if playbook:
-        print(f"\nplaybook  : {playbook.name} ({len(playbook.steps)} adım)")
-        for step in playbook.steps:
-            print(f"  - {step.tool}.{step.capability} [{step.risk.label}]")
-    else:
-        print("\nplaybook  : yok (manuel)")
+    if info["description"]:
+        print(f"\naçıklama  : {info['description'][:1200].strip()}")
+    if info["mitigations"]:
+        print(f"\nmitigasyonlar ({len(info['mitigations'])}):")
+        for m in info["mitigations"]:
+            label = m["name"][:78]
+            print(f"  - {m['id']:<12} {label}  ({m['url']})")
+    if info["cases"]:
+        print(f"\ncase study'ler ({len(info['cases'])}):")
+        for c_name in info["cases"]:
+            print(f"  - {c_name[:96]}")
+    if info["in_seed"]:
+        tech = atlas.get(info["id"])
+        if tech:
+            mode = "manuel test" if tech.manual else "otomatik test"
+            print(f"\nkalkan testi ({mode}):")
+            if tech.capabilities:
+                print(f"  - yetenekler : {', '.join(tech.capabilities)}"
+                      " (llmprobe adaptörü)")
+            if tech.test_approach:
+                print(f"  - yaklaşım   : {tech.test_approach}")
     return 0
 
 
@@ -517,9 +594,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_know = sub.add_parser("knowledge", help="ATT&CK/ATLAS bilgi tabanı")
     p_know.add_argument("action", choices=["fetch", "search", "show", "atlas"])
     p_know.add_argument("query", nargs="?", default="")
+    p_know.add_argument(
+        "--query", "-q",
+        dest="search_query",
+        default=None,
+        help="arama sorgusu (option srasindan bagimsiz calisir)",
+    )
     p_know.add_argument("--technique", default="")
-    p_know.add_argument("--domain", default="enterprise", choices=["enterprise", "mobile", "ics"])
+    p_know.add_argument(
+        "--domain",
+        default="enterprise",
+        choices=["enterprise", "mobile", "ics", "atlas"],
+        help="veri domeni; atlas = TAM ATLAS katalogu (STIX)",
+    )
     p_know.add_argument("--force", action="store_true")
+    p_know.add_argument(
+        "--cache-root",
+        default=None,
+        help="onbellek dizini (varsayilan ~/.kalkan/<domain>)",
+    )
     p_know.set_defaults(func=cmd_knowledge)
 
     p_vuln = sub.add_parser("vuln", help="CVE / CVSS / EPSS / KEV istihbarati")

@@ -109,13 +109,20 @@ class AttackKnowledge:
 
     def search(self, query: str, limit: int = 20) -> list[dict[str, Any]]:
         self.load()
-        q = query.lower()
-        hits = [
-            info
-            for info in self._index.values()
-            if q in info["name"].lower() or q in info["description"].lower()
-        ]
-        return hits[:limit]
+        tokens = query.lower().split()
+        phrase = " ".join(tokens)
+        name_hits: list[dict[str, Any]] = []
+        phrase_hits: list[dict[str, Any]] = []
+        token_hits: list[dict[str, Any]] = []
+        for info in self._index.values():
+            if tokens and all(t in info["name"].lower() for t in tokens):
+                name_hits.append(info)
+            elif tokens and phrase in info["description"].lower():
+                phrase_hits.append(info)
+            elif tokens and all(t in f"{info['name']} {info['description']}".lower()
+                                for t in tokens):
+                token_hits.append(info)
+        return (name_hits + phrase_hits + token_hits)[:limit]
 
     def by_tactic(self, tactic: str, limit: int = 100) -> list[dict[str, Any]]:
         self.load()

@@ -69,6 +69,25 @@ python -m kalkan.cli --scope examples/scope.json tools
 
 `tools`, hangi adaptörün hazır olduğunu listeler. Kurulmamış araçlar `unavailable` görünür — bu bir hata değil, beklenen davranıştır.
 
+### Bilgi tabanını indirmek (isteğe bağlı ama önerilen)
+
+Kalkan ATT&CK ve ATLAS bilgi tabanlarını resmi STIX dağıtımlarından indirip `~/.kalkan/` altına önbellekler:
+
+```powershell
+# ATT&CK enterprise (~55 MB)
+python -m kalkan.cli knowledge fetch
+
+# ATLAS tam katalog (~1.6 MB): teknik + mitigation + case study
+python -m kalkan.cli knowledge fetch --domain atlas
+
+# kontrol: bir teknik goster
+python -m kalkan.cli knowledge show --technique T1046
+python -m kalkan.cli knowledge show --domain atlas --technique AML.T0051
+```
+
+Bu adım istenirse atlanabilir; temel komutlar (`tools`, `coverage`, `knowledge atlas`)
+önbellek olmadan da çalışır.
+
 ### Test suite (isteğe bağlı):
 
 ```powershell
