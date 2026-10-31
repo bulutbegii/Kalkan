@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..models import Action, Risk
+from ..models import Action, ActionResult, Risk
 from ..registry import ToolSpec
 from .base import Adapter
+
+_SCAN_TIMEOUT_FLOOR = 900
 
 
 class NucleiAdapter(Adapter):
@@ -42,7 +44,13 @@ class NucleiAdapter(Adapter):
             cmd += ["-rl", str(args["rate_limit"])]
         if args.get("exclude_intrusive", True):
             cmd += ["-exclude-tags", "intrusive,dos,fuzz"]
+        cmd += ["-timeout", str(args.get("req_timeout", 10)),
+                "-retries", str(args.get("retries", 1))]
         return cmd
+
+    def run(self, action: Action, timeout: int = 300) -> ActionResult:
+        floor = int(action.args.get("scan_timeout", _SCAN_TIMEOUT_FLOOR))
+        return super().run(action, timeout=max(timeout, floor))
 
     def parse(self, stdout: str, action: Action) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []

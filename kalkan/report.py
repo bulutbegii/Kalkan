@@ -72,7 +72,8 @@ def _discoveries(results: Iterable[ActionResult]) -> list[str]:
 def render(target: str, objective: str, actions: list[Action],
            results: list[ActionResult], notes: list[str] | None = None,
            summary: str = "", scope: str = "", when: datetime | None = None,
-           loot: list[dict[str, Any]] | None = None) -> str:
+           loot: list[dict[str, Any]] | None = None,
+           correlation: list[dict[str, Any]] | None = None) -> str:
     when = when or datetime.now()
     lines = [
         "# Kalkan Tarama Raporu",
@@ -109,6 +110,17 @@ def render(target: str, objective: str, actions: list[Action],
     disc = _discoveries(results)
     if disc:
         lines += ["## Keşifler", "", *disc, ""]
+
+    if correlation:
+        lines += ["## Sürüm→CVE Korelasyonu", "",
+                  "| CVE | Skor | Derece | KEV | Ürün/Sürüm | MSF modülü |",
+                  "|-----|------|--------|-----|------------|------------|"]
+        for c in correlation:
+            pv = f"{c.get('product', '')} {c.get('version', '')}".strip() or "-"
+            kev = "✓" if c.get("kev") else ""
+            lines.append(f"| {c['cve']} | {c['score']} | {c['tier']} | {kev} | "
+                         f"{pv} | {c.get('msf_module') or '-'} |")
+        lines.append("")
 
     if loot:
         lines += ["## Loot / Elde Edilen Veri", ""]
@@ -161,7 +173,8 @@ def _persist_loot(results: list[ActionResult], target: str, out_dir: Path,
 
 def write_report(plan: Plan, results: list[ActionResult], *, summary: str = "",
                  scope: str = "", out_dir: str | Path = DEFAULT_DIR,
-                 when: datetime | None = None) -> Path:
+                 when: datetime | None = None,
+                 correlation: list[dict[str, Any]] | None = None) -> Path:
     """Raporu reports/<hedef>_<zaman>.md olarak yaz ve yolunu döndür.
     Gercek istismar ciktilari (loot) ayrica reports/loot/ altina kaydedilir."""
     when = when or datetime.now()
@@ -172,7 +185,7 @@ def write_report(plan: Plan, results: list[ActionResult], *, summary: str = "",
     md = render(
         target=plan.target, objective=plan.objective, actions=plan.actions,
         results=results, notes=plan.notes, summary=summary, scope=scope, when=when,
-        loot=loot,
+        loot=loot, correlation=correlation,
     )
     fname = f"{_slug(plan.target)}_{stamp}.md"
     path = directory / fname

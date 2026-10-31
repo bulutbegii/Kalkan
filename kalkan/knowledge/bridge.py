@@ -113,8 +113,20 @@ SQLI_CWES = frozenset({"CWE-89", "CWE-564", "CWE-943"})
 
 
 def msf_module(cve_id: str) -> tuple[str, str] | None:
-    """CVE icin kurasyonlu MSF modulu (yol, not) veya None."""
-    return CVE_TO_MSF.get(str(cve_id).strip().upper())
+    """CVE icin MSF modulu (yol, not) veya None.
+
+    Once kurasyonlu tablo (iyi adlandirma); yoksa kurulu msf'in modul
+    katalogundan dinamik indeks (binlerce CVE)."""
+    cid = str(cve_id).strip().upper()
+    curated = CVE_TO_MSF.get(cid)
+    if curated:
+        return curated
+    try:
+        from . import msfindex
+        path = msfindex.module_for_cve(cid)
+    except Exception:  # noqa: BLE001 - msf yoksa kopru bozulmasin
+        path = None
+    return (path, "msf katalogu") if path else None
 
 
 def is_sqli(cwe: list[str] | tuple[str, ...] | None = None, description: str = "") -> bool:

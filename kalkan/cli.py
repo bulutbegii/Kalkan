@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__, ui
+from . import __version__, correlate, ui
 from .adapters import load_default_registry
 from .audit import AuditLog
 from .knowledge import atlas, mapping
@@ -100,6 +100,21 @@ def _print_plan(p: Plan, as_json: bool) -> None:
             print(ui.dim(f"       - {json.dumps(a.args, ensure_ascii=False)}"))
     for note in p.notes:
         print(f"  {ui.grey('not:')} {ui.grey(note)}")
+
+
+def _print_correlation(rows: list) -> None:
+    """Sürüm→CVE korelasyon bulgularını ve 'sonraki adım' ipuçlarını bas."""
+    if not rows:
+        return
+    print(f"\n  {ui.bold('Sürüm→CVE korelasyonu')} ({len(rows)} CVE):")
+    for c in rows[:8]:
+        kev = ui.red(" KEV") if c["kev"] else ""
+        mod = ui.cyan(f"  → {c['msf_module']}") if c["msf_module"] else ""
+        pv = f"{c.get('product', '')} {c.get('version', '')}".strip()
+        print(f"    {ui.bold(c['cve'])}  {ui.risk('intrusive') if c['score'] >= 7 else c['tier']} "
+              f"{c['score']}{kev}  {ui.dim(pv)}{mod}")
+    for tip in correlate.next_steps(rows):
+        print(ui.dim(f"    → {tip}"))
 
 
 def _progress_event(evt: str, idx: int, total: int, action: Action, result) -> None:
@@ -531,10 +546,12 @@ def cmd_run(args) -> int:
             print(f"\n{ui.red('POLİTİKA REDDİ')} - plan durduruldu: {exc}", file=sys.stderr)
             return 2
         print(f"\n  {ui.grey('denetim kaydı:')} {args.audit}")
+        kor = correlate.correlate(results) if not args.dry_run else []
+        _print_correlation(kor)
         if not getattr(args, "no_report", False) and not args.dry_run:
             from . import report
             try:
-                rp = report.write_report(plan, results, scope=args.scope)
+                rp = report.write_report(plan, results, scope=args.scope, correlation=kor)
                 print(f"  rapor: {rp}")
             except Exception as exc:  # noqa: BLE001 - rapor hatası taramayı bozmasın
                 print(f"  rapor yazılamadı: {exc}", file=sys.stderr)
@@ -692,10 +709,12 @@ def cmd_chat(args) -> int:
             ozet = router.summarize(_summary_digest(user_text, plan, results), timeout=240)
             if ozet:
                 print("  🗒  " + ozet.replace("\n", "\n      "))
+        kor = correlate.correlate(results) if not args.dry_run else []
+        _print_correlation(kor)
         if not state.get("no_report") and not args.dry_run:
             from . import report
             try:
-                rp = report.write_report(plan, results, summary=ozet, scope=args.scope)
+                rp = report.write_report(plan, results, summary=ozet, scope=args.scope, correlation=kor)
                 print(f"  rapor: {rp}")
             except Exception as exc:  # noqa: BLE001
                 print(f"  rapor yazılamadı: {exc}", file=sys.stderr)
