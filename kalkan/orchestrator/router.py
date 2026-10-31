@@ -45,6 +45,23 @@ INTENT_SCHEMA = {
     "additionalProperties": False,
 }
 
+SUMMARY_SYSTEM = """Sen bir sizma testi asistanisin. Sana bir plan ve
+calisma sonuclarinin kisa dokumu verilir. Gorevin:
+- 2-4 cumlelik, sade TURKCE bir ozet yaz: ne yapildi, ne bulundu.
+- Ardindan tek satir "Sonraki adim:" ile mantikli bir oneri ver.
+
+KRITIK kural - durum kodlarini dogru yorumla:
+- "unavailable" = ARAC KURULU DEGIL veya API anahtari yok (orn. nmap PATH'te
+  yok, SHODAN_API_KEY yok). Bu, HEDEFLE ilgili DEGILDIR. Bundan "sunucu
+  yanit vermedi", "hedef erisilemez", "kapali" gibi sonuc CIKARMA. Dogru
+  yorum: "araci kurmak gerekiyor".
+- "dry-run" = komut uretildi ama CALISTIRILMADI (simulasyon).
+- "ok" = gercekten calisti; bulgular varsa onlari ozetle.
+- "denied" = politika/kapsam reddetti.
+
+Kurallar: SADECE verilen bilgiye dayan, uydurma; komut/komut satiri yazma;
+teknik kimlikleri (T1190 vb.) gerekiyorsa anabilirsin. Kisa ve net ol."""
+
 SYSTEM_PROMPT = """Sen bir guvenlik orkestrasyon yonlendiricisisin.
 Gorevin: kullanicinin istegini analiz edip SADECE asagidaki katalogdan
 teknik secmek ve hedefleri cikarmak.
@@ -147,6 +164,36 @@ class Router:
                 f"LLM uç noktası ({self.endpoint}) erişilemez; kural tabanlı yedek kullanıldı",
             ),
         )
+
+    def summarize(self, prompt: str, timeout: int | None = None) -> str:
+        """Plan/sonuc dokumunden serbest TURKCE ozet uret (JSON degil).
+
+        Model yoksa/yanit vermezse bos string doner; cagiran taraf bunu
+        sessizce atlar (ozet katmani REPL'i asla dusurmemeli)."""
+        if not self.available():
+            return ""
+        model, _ = self.resolve_model()
+        body = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "options": {"temperature": 0.3, "num_predict": 320},
+            "messages": [
+                {"role": "system", "content": SUMMARY_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        req = urllib.request.Request(
+            f"{self.endpoint}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            return ""
+        return (payload.get("message", {}).get("content") or "").strip()
 
     def _route_llm(self, text: str) -> Intent:
         model, warn = self.resolve_model()

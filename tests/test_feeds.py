@@ -158,6 +158,29 @@ class TestChatShim(unittest.TestCase):
         self.assertIsNone(ns.module)
 
 
+class TestDefaultCommand(unittest.TestCase):
+    def _inj(self, argv):
+        from kalkan.cli import _inject_default_command
+        return _inject_default_command(argv)
+
+    def test_empty_becomes_home(self):
+        self.assertEqual(self._inj([]), ["home"])
+
+    def test_bare_global_flag_becomes_home(self):
+        self.assertEqual(self._inj(["--scope", "s.json"]), ["--scope", "s.json", "home"])
+
+    def test_flags_without_command_become_chat(self):
+        self.assertEqual(self._inj(["--target", "x"]), ["chat", "--target", "x"])
+
+    def test_known_command_untouched(self):
+        self.assertEqual(self._inj(["plan", "--target", "x"]), ["plan", "--target", "x"])
+        self.assertEqual(self._inj(["--scope", "s", "run"]), ["--scope", "s", "run"])
+
+    def test_help_untouched(self):
+        self.assertEqual(self._inj(["--help"]), ["--help"])
+        self.assertEqual(self._inj(["-h"]), ["-h"])
+
+
 class TestNucleiCveId(unittest.TestCase):
     def _cmd(self, args):
         from kalkan.adapters.nuclei import NucleiAdapter

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .adapters import load_default_registry
 from .audit import AuditLog
 from .knowledge import atlas, mapping
@@ -211,6 +212,25 @@ def _build_plans(args, intent: Intent) -> list[Plan]:
 
 
 def cmd_scope(args) -> int:
+    if args.action == "add":
+        if not args.target:
+            print("kullanım: kalkan scope add <hedef>", file=sys.stderr)
+            return 2
+        from .scope import add_to_scope_file
+        try:
+            info = add_to_scope_file(args.scope, args.target)
+        except ScopeViolation as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        if info["changed"]:
+            print(f"eklendi ({info['kind']}): {info['host']}  → {args.scope}")
+        else:
+            print(f"zaten kapsamda ({info['kind']}): {info['host']}")
+        if info["port_added"]:
+            print(f"  port eklendi: {info['port']}")
+        print("  ! bunu eklemek, bu hedefi test etmeye YETKİLİ olduğun beyanıdır.")
+        return 0
+
     guard = _scope_guard(args)
     if args.action == "check":
         try:
@@ -508,7 +528,8 @@ def cmd_chat(args) -> int:
     audit = AuditLog(args.audit)
     registry = load_default_registry()
 
-    state = {"target": args.target or "", "auto": False}
+    state = {"target": args.target or "", "auto": False,
+             "summary": not getattr(args, "no_summary", False)}
 
     def approver(action: Action) -> bool:
         if state["auto"]:
@@ -536,7 +557,28 @@ def cmd_chat(args) -> int:
         "arg": [],
     }
 
-    def run_plan(plan: Plan) -> None:
+    def _summary_digest(user_text: str, plan: Plan, results: list) -> str:
+        """Model ozeti icin kompakt plan/sonuc dokumu (token tasarruflu)."""
+        lines = [f"Istek: {user_text}", f"Hedef: {plan.target}",
+                 f"Plan: " + ", ".join(f"{a.tool}.{a.capability}[{a.risk.label}]"
+                                       for a in plan.actions)]
+        lines.append("Sonuclar:")
+        for r in results:
+            a = r.action
+            bit = f"- {a.tool}.{a.capability}: {r.status}"
+            if r.status in ("unavailable", "error", "denied") and r.detail:
+                bit += f" (NEDEN: {r.detail})"
+            p = r.parsed or {}
+            for k in ("count", "open_ports", "vulnerable", "by_severity", "findings"):
+                if k in p:
+                    v = p[k]
+                    if isinstance(v, list):
+                        v = len(v)
+                    bit += f"; {k}={v}"
+            lines.append(bit)
+        return "\n".join(lines)
+
+    def run_plan(plan: Plan, user_text: str = "") -> None:
         _print_plan(plan, False)
         if not plan.actions:
             return
@@ -558,6 +600,11 @@ def cmd_chat(args) -> int:
             if r.parsed:
                 prev = json.dumps(r.parsed, ensure_ascii=False)
                 print(f"    - {prev[:400]}{'...' if len(prev) > 400 else ''}")
+        if state["summary"] and online:
+            print("\n  ... özet hazırlanıyor")
+            ozet = router.summarize(_summary_digest(user_text, plan, results))
+            if ozet:
+                print("  🗒  " + ozet.replace("\n", "\n      "))
 
     def make_plan(text: str, extra_args: list[str] | None = None) -> Plan | None:
         shim = _chat_shim(base, text)
@@ -588,6 +635,7 @@ def cmd_chat(args) -> int:
     print(f"  hedef   : {state['target'] or '(ayarlı değil — /target ile belirle)'}")
     print(f"  risk    : passive/active otomatik · intrusive/destructive ONAYLI"
           f"{' · dry-run' if args.dry_run else ''}")
+    print(f"  özet    : {'açık' if state['summary'] and online else 'kapalı'}")
     print(f"  kapsam  : {args.scope}   denetim: {args.audit}")
 
     while True:
@@ -610,9 +658,10 @@ def cmd_chat(args) -> int:
                 print("  /target [host]   oturum hedefini göster/ayarla")
                 print("  /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
                 print("  /auto [on|off]   intrusive onayını atla (dikkat)")
+                print("  /ozet [on|off]   her turdan sonra Türkçe model özeti")
                 print("  /plan <metin>    sadece planla, çalıştırma")
                 print("  /feed [tail|status]  son besleme olayları")
-                print("  /scope           kapsam dosyası")
+                print("  /scope [add <h>] kapsamı göster / hedef ekle")
                 print("  /quit            çık")
                 print("  (bunların dışında yazdığın her şey modele niyet olarak gider)")
                 continue
@@ -634,8 +683,31 @@ def cmd_chat(args) -> int:
                 state["auto"] = rest.lower() in ("on", "1", "evet", "aç")
                 print(f"  auto-onay = {'AÇIK (intrusive sormadan çalışır)' if state['auto'] else 'kapalı'}")
                 continue
+            if cmd in ("ozet", "özet"):
+                if rest:
+                    state["summary"] = rest.lower() in ("on", "1", "evet", "aç")
+                print(f"  özet = {'açık' if state['summary'] else 'kapalı'}"
+                      f"{'' if online else ' (model çevrimdışı → özet üretilemez)'}")
+                continue
             if cmd == "scope":
-                print(f"  kapsam dosyası: {args.scope}  (ayrıntı: kalkan scope show)")
+                sub = rest.split(maxsplit=1)
+                if sub and sub[0].lower() == "add":
+                    tgt = sub[1].strip() if len(sub) > 1 else state["target"]
+                    if not tgt:
+                        print("  kullanım: /scope add <hedef>  (ya da önce /target)")
+                        continue
+                    from .scope import Scope, ScopeGuard, add_to_scope_file
+                    try:
+                        info = add_to_scope_file(args.scope, tgt)
+                    except ScopeViolation as exc:
+                        print(f"  {exc}", file=sys.stderr)
+                        continue
+                    executor.scope = ScopeGuard(Scope.load(args.scope))
+                    msg = "eklendi" if info["changed"] else "zaten kapsamda"
+                    print(f"  {msg} ({info['kind']}): {info['host']}")
+                    print("  ! bu, hedefi test etmeye YETKİLİ olduğun beyanıdır.")
+                else:
+                    print(executor.scope.describe())
                 continue
             if cmd == "feed":
                 from .feeds import JsonlSink
@@ -664,8 +736,129 @@ def cmd_chat(args) -> int:
         try:
             plan = make_plan(line)
             if plan:
-                run_plan(plan)
+                run_plan(plan, line)
         except Exception as exc:  # noqa: BLE001 - bir tur hatasi oturumu dusurmesin
+            print(f"  hata: {exc}", file=sys.stderr)
+
+    return 0
+
+
+def _home_ns(base: dict[str, Any], **over):
+    """Menüden mevcut cmd_* fonksiyonlarını çağırmak için tam varsayılanlı args."""
+    import types
+    d = dict(
+        scope=base.get("scope", "scope.json"), audit=base.get("audit", DEFAULT_AUDIT),
+        text="", technique=[], tactic=None, target=None,
+        max_risk="intrusive", module=None, payload=None, mode=None,
+        endpoint=base.get("endpoint", DEFAULT_ENDPOINT), model=base.get("model", DEFAULT_MODEL),
+        timeout=300, json=False, yes=False, dry_run=False,
+        allow_intrusive=True, allow_destructive=False,
+        from_feed=False, feed_min_score=40.0, arg=[], no_summary=False,
+        action=None, risk="passive",
+        once=False, max_cycles=None, vuln_interval=None, attack_interval=None,
+        atlas_interval=None, days=None, no_kev=False, no_epss=False,
+        stdout=False, webhook="", from_start=False, kind=[], min_tier="", limit=20,
+        query="", search_query=None, domain="enterprise", force=False, cache_root=None,
+    )
+    d.update(over)
+    return types.SimpleNamespace(**d)
+
+
+def _ask(prompt: str, default: str = "") -> str:
+    try:
+        v = input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return default
+    return v or default
+
+
+def cmd_home(args) -> int:
+    """Kalkan ana menü arayüzü — neyin ne yaptığını gösterir, seçtir."""
+    base = {"scope": getattr(args, "scope", "scope.json"),
+            "audit": getattr(args, "audit", DEFAULT_AUDIT),
+            "endpoint": getattr(args, "endpoint", DEFAULT_ENDPOINT),
+            "model": getattr(args, "model", DEFAULT_MODEL)}
+
+    router = Router(endpoint=base["endpoint"], model=base["model"])
+    online = router.available()
+    scope_ok = Path(base["scope"]).exists()
+
+    def banner():
+        print("\n" + "═" * 56)
+        print("  ██ KALKAN ██   yetkili güvenlik orkestrasyon çekirdeği")
+        print(f"  v{__version__}   model: {base['model']} "
+              f"[{'çevrimiçi' if online else 'çevrimdışı'}]   "
+              f"kapsam: {'var' if scope_ok else 'YOK'}")
+        print("═" * 56)
+
+    MENU = [
+        ("1", "Sohbet (chat)", "Modelle konuşarak planla/çalıştır — ana kullanım"),
+        ("2", "Plan üret", "Tek istek → plan göster (çalıştırmaz)"),
+        ("3", "Çalıştır", "Tek istek → planı kapılardan geçirip yürüt"),
+        ("4", "Kapsam (scope)", "İzinli hedefleri göster / yeni hedef ekle"),
+        ("5", "Canlı besleme", "CVE/ATT&CK akışı: durum · son olaylar · başlat"),
+        ("6", "Araçlar & kapsama", "Kurulu araçlar ve teknik kapsama durumu"),
+        ("7", "Bilgi tabanı", "ATT&CK / ATLAS teknik arama"),
+        ("h", "Yardım", "Bu menüyü açıklar"),
+        ("q", "Çıkış", ""),
+    ]
+
+    def show_menu():
+        print()
+        for key, title, desc in MENU:
+            print(f"  [{key}] {title:<20} {desc}")
+
+    banner()
+    if not scope_ok:
+        print(f"  ⚠ kapsam dosyası yok ({base['scope']}). '4 → ekle' ile hedef tanımla\n"
+              f"    veya examples/scope.json'u kopyala.")
+    show_menu()
+
+    while True:
+        choice = _ask("\nkalkan> ").lower()
+        if choice in ("q", "quit", "exit", "0"):
+            print("görüşürüz.")
+            return 0
+        try:
+            if choice in ("h", "?", "help"):
+                show_menu()
+            elif choice == "1":
+                tgt = _ask("  hedef (boş geç, sonra /target): ")
+                cmd_chat(_home_ns(base, target=tgt or ""))
+                banner(); show_menu()
+            elif choice in ("2", "3"):
+                tgt = _ask("  hedef: ")
+                if not tgt:
+                    print("  hedef gerekli."); continue
+                req = _ask("  ne yapılsın? (örn. port tara, web zafiyet): ")
+                ns = _home_ns(base, target=tgt, text=req)
+                (cmd_plan if choice == "2" else cmd_run)(ns)
+            elif choice == "4":
+                print("  [g] göster   [e] hedef ekle")
+                s = _ask("  seçim: ").lower()
+                if s == "e":
+                    tgt = _ask("  eklenecek hedef: ")
+                    if tgt:
+                        cmd_scope(_home_ns(base, action="add", target=tgt))
+                else:
+                    cmd_scope(_home_ns(base, action="show"))
+            elif choice == "5":
+                print("  [d] durum   [o] son olaylar   [b] arka planda başlat")
+                s = _ask("  seçim: ").lower()
+                act = {"d": "status", "o": "tail", "b": "start"}.get(s, "status")
+                cmd_feed(_home_ns(base, action=act))
+            elif choice == "6":
+                cmd_tools(_home_ns(base))
+                cmd_coverage(_home_ns(base))
+            elif choice == "7":
+                dom = _ask("  domain [enterprise/mobile/ics/atlas] (boş=enterprise): ") or "enterprise"
+                q = _ask("  arama: ")
+                cmd_knowledge(_home_ns(base, action="search", search_query=q, domain=dom))
+            else:
+                print("  geçersiz seçim. [h] yardım")
+        except SystemExit as exc:
+            print(f"  (iptal: {exc})")
+        except Exception as exc:  # noqa: BLE001 - menü oturumu düşmesin
             print(f"  hata: {exc}", file=sys.stderr)
 
     return 0
@@ -995,8 +1188,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit", default=DEFAULT_AUDIT, help="denetim kaydı yolu")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_scope = sub.add_parser("scope", help="kapsamı göster veya bir hedefi denetle")
-    p_scope.add_argument("action", choices=["show", "check"], nargs="?", default="show")
+    p_scope = sub.add_parser("scope", help="kapsamı göster, denetle veya hedef ekle")
+    p_scope.add_argument("action", choices=["show", "check", "add"], nargs="?", default="show")
     p_scope.add_argument("target", nargs="?", default="")
     p_scope.add_argument("--risk", default="passive")
     p_scope.set_defaults(func=cmd_scope)
@@ -1073,6 +1266,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_feed.add_argument("--json", action="store_true")
     p_feed.set_defaults(func=cmd_feed)
 
+    p_home = sub.add_parser("home", help="Kalkan ana menü arayüzü (argümansız 'kalkan' bunu açar)")
+    p_home.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    p_home.add_argument("--model", default=DEFAULT_MODEL)
+    p_home.set_defaults(func=cmd_home)
+
     p_chat = sub.add_parser("chat", help="modelle sohbet ederek planla/çalıştır (REPL)")
     p_chat.add_argument("--target", default="", help="oturum hedefi (sonra /target ile değişir)")
     p_chat.add_argument("--from-feed", action="store_true", help="canlı CVE beslemesini öneriye kat")
@@ -1083,6 +1281,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--model", default=DEFAULT_MODEL)
     p_chat.add_argument("--timeout", type=int, default=300)
     p_chat.add_argument("--dry-run", action="store_true", help="komutları üret, çalıştırma")
+    p_chat.add_argument("--no-summary", action="store_true", help="tur sonu Türkçe model özetini kapat")
     p_chat.add_argument("--allow-intrusive", action="store_true", default=True)
     p_chat.add_argument("--allow-destructive", action="store_true")
     p_chat.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
@@ -1146,8 +1345,41 @@ def _setup_console() -> None:
             pass
 
 
+_KNOWN_COMMANDS = {
+    "scope", "tools", "coverage", "knowledge", "vuln", "feed",
+    "home", "chat", "router", "plan", "run", "audit",
+}
+_GLOBAL_VALUE_OPTS = {"--scope", "--audit"}
+
+
+def _inject_default_command(argv: list[str]) -> list[str]:
+    """Alt komut verilmemişse menü arayüzüne düş: argümansız `kalkan` → 'home'.
+    Global bayraktan sonra komut yoksa yine 'home'; bilinmeyen bir bayrakla
+    gelinmişse (örn. --target) 'chat'e verilir (geriye dönük kolaylık)."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in ("-h", "--help"):
+            return argv
+        if tok in _GLOBAL_VALUE_OPTS:
+            i += 2
+            continue
+        if tok.startswith("--") and "=" in tok and tok.split("=", 1)[0] in _GLOBAL_VALUE_OPTS:
+            i += 1
+            continue
+        break
+    if i >= len(argv):
+        return argv[:i] + ["home"] + argv[i:]
+    if argv[i] not in _KNOWN_COMMANDS:
+        return argv[:i] + ["chat"] + argv[i:]
+    return argv
+
+
 def main(argv: list[str] | None = None) -> int:
     _setup_console()
+    if argv is None:
+        argv = sys.argv[1:]
+    argv = _inject_default_command(list(argv))
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

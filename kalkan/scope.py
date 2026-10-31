@@ -57,6 +57,53 @@ def parse_target(raw: str) -> tuple[str, str, int | None]:
     return kind, host, port
 
 
+def add_to_scope_file(path: str | Path, raw: str) -> dict:
+    """Bir hedefi kapsam dosyasina ekle (domain/ip/cidr otomatik ayrilir).
+
+    Dosyadaki diger alanlari korur. Donen sozluk: kind/host/port/changed.
+    DIKKAT: buraya ekleme, o hedefi test etmeye YETKILI oldugunu beyan
+    etmen demektir; Kalkan bu beyana guvenir.
+    """
+    p = Path(path)
+    if not p.exists():
+        raise ScopeViolation(
+            f"kapsam dosyası yok: {p}\n  önce örneği kopyala: examples/scope.json"
+        )
+    data = json.loads(p.read_text(encoding="utf-8"))
+    kind, host, port = parse_target(raw)
+
+    changed = False
+    if kind == "domain":
+        lst = [d.lower() for d in data.get("allow_domains", [])]
+        if host not in lst:
+            lst.append(host)
+            data["allow_domains"] = lst
+            changed = True
+    else:
+        entry = host if kind == "cidr" else (
+            f"{host}/32" if ":" not in host else f"{host}/128"
+        )
+        lst = list(data.get("allow_cidrs", []))
+        if entry not in lst:
+            lst.append(entry)
+            data["allow_cidrs"] = lst
+            changed = True
+        host = entry
+
+    port_added = False
+    if port is not None and data.get("allow_ports"):
+        ports = [int(x) for x in data["allow_ports"]]
+        if port not in ports:
+            ports.append(port)
+            data["allow_ports"] = sorted(ports)
+            port_added = True
+
+    if changed or port_added:
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"kind": kind, "host": host, "port": port,
+            "changed": changed, "port_added": port_added}
+
+
 @dataclass(frozen=True)
 class Scope:
     name: str
