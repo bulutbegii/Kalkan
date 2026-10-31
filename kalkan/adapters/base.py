@@ -77,6 +77,7 @@ class Adapter:
                     encoding="utf-8",
                     errors="replace",
                     timeout=timeout,
+                    stdin=subprocess.DEVNULL,
                 )
             except subprocess.TimeoutExpired:
                 return ActionResult(

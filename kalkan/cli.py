@@ -536,7 +536,7 @@ def cmd_chat(args) -> int:
     audit = AuditLog(args.audit)
     registry = load_default_registry()
 
-    state = {"target": args.target or "", "auto": False,
+    state = {"target": args.target or "", "auto": True,
              "summary": not getattr(args, "no_summary", False),
              "no_report": getattr(args, "no_report", False)}
 
