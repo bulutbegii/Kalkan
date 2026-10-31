@@ -1,0 +1,143 @@
+import tempfile
+import unittest
+from pathlib import Path
+
+from kalkan.feeds.events import FeedEvent, JsonlSink
+from kalkan.feeds.scheduler import FeedConfig, FeedDaemon
+from kalkan.knowledge.vuln import CveRecord, VulnStore
+
+
+class TestJsonlSink(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "events.jsonl"
+        self.sink = JsonlSink(self.path)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_emit_and_tail_roundtrip(self):
+        self.sink.emit(FeedEvent(kind="cve.new", source="nvd", id="CVE-1", title="x"))
+        self.sink.emit(FeedEvent(kind="cve.kev", source="kev", id="CVE-2", tier="critical"))
+        events = self.sink.tail(limit=10)
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1].id, "CVE-2")
+        self.assertEqual(events[-1].kind, "cve.kev")
+
+    def test_follow_yields_appended(self):
+        self.sink.emit(FeedEvent(kind="cve.new", source="nvd", id="CVE-10"))
+        self.sink.emit(FeedEvent(kind="cve.new", source="nvd", id="CVE-11"))
+        got = []
+        for ev in self.sink.follow(from_start=True):
+            got.append(ev.id)
+            if len(got) == 2:
+                break
+        self.assertEqual(got, ["CVE-10", "CVE-11"])
+
+    def test_event_json_roundtrip(self):
+        ev = FeedEvent(kind="feed.sync", source="nvd", data={"a": 1})
+        back = FeedEvent.from_json(ev.to_json())
+        self.assertEqual(back.kind, "feed.sync")
+        self.assertEqual(back.data["a"], 1)
+
+
+class _FakeStore(VulnStore):
+    """Agdan bagimsiz store: sync() onceden yuklenmis kayitlari dondurur."""
+
+    def __init__(self, home, records):
+        super().__init__(home)
+        for r in records:
+            self.cves[r.id] = r
+        self._fake_new = [r.id for r in records]
+
+    def sync(self, **kwargs):
+        return {
+            "fetched": len(self._fake_new),
+            "added": len(self._fake_new),
+            "new": list(self._fake_new),
+            "total": len(self.cves),
+            "kev": sum(1 for r in self.cves.values() if r.kev),
+            "synced_at": "2026-01-01T00:00:00+00:00",
+        }
+
+
+class TestFeedDaemon(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name)
+        records = [
+            CveRecord(id="CVE-2024-1000", description="SQL injection", cwe=("CWE-89",),
+                      base_score=9.8, severity="critical", kev=True, kev_added="2024-05-01"),
+            CveRecord(id="CVE-2024-1001", description="RCE in parser", cwe=("CWE-94",),
+                      base_score=9.1, severity="critical"),
+            CveRecord(id="CVE-2024-1002", description="minor info leak", cwe=("CWE-200",),
+                      base_score=3.1, severity="low"),
+        ]
+        self.store = _FakeStore(self.home / "vuln", records)
+        self.sink = JsonlSink(self.home / "feeds" / "events.jsonl")
+        self.daemon = FeedDaemon(
+            config=FeedConfig(critical_score=40.0),
+            home=self.home / "feeds",
+            sink=self.sink,
+            store=self.store,
+        )
+        self.daemon.sync_knowledge = lambda domain: []  # type: ignore[assignment]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_sync_vuln_emits_kind_per_tier(self):
+        events = self.daemon.sync_vuln()
+        kinds = {e.id: e.kind for e in events if e.id}
+        self.assertEqual(kinds["CVE-2024-1000"], "cve.kev")
+        self.assertEqual(kinds["CVE-2024-1001"], "cve.critical")
+        self.assertEqual(kinds["CVE-2024-1002"], "cve.new")
+        self.assertTrue(any(e.kind == "feed.sync" for e in events))
+
+    def test_sync_vuln_attaches_bridge(self):
+        events = self.daemon.sync_vuln()
+        kev = next(e for e in events if e.id == "CVE-2024-1000")
+        self.assertIn("attack", kev.data)
+        self.assertIn("T1190", kev.data["attack"]["runnable"])
+
+    def test_run_once_writes_state_and_pid_cleared(self):
+        res = self.daemon.run(once=True, write_pid=True)
+        self.assertEqual(res["cycles"], 1)
+        self.assertFalse(self.daemon.pid_path.exists())
+        st = self.daemon.status()
+        self.assertIn("vuln_synced", st)
+        self.assertEqual(st["store"]["cve_count"], 3)
+
+    def test_max_events_per_cycle(self):
+        self.daemon.config.max_events_per_cycle = 1
+        events = self.daemon.sync_vuln()
+        cve_events = [e for e in events if e.kind.startswith("cve.")]
+        self.assertEqual(len(cve_events), 1)
+
+
+class TestNucleiCveId(unittest.TestCase):
+    def _cmd(self, args):
+        from kalkan.adapters.nuclei import NucleiAdapter
+        from kalkan.models import Action, Risk
+        action = Action(tool="nuclei", capability="web_template",
+                        target="http://x", args=args, risk=Risk.ACTIVE)
+        return NucleiAdapter().command(action)
+
+    def test_cve_id_adds_id_flag_and_drops_tags(self):
+        cmd = self._cmd({"cve_id": "CVE-2024-0001", "tags": "cve,exposure"})
+        self.assertIn("-id", cmd)
+        self.assertEqual(cmd[cmd.index("-id") + 1], "CVE-2024-0001")
+        self.assertNotIn("-tags", cmd)
+
+    def test_multiple_cve_ids_joined(self):
+        cmd = self._cmd({"cve_id": ["CVE-2024-0001", "CVE-2024-0002"]})
+        self.assertEqual(cmd[cmd.index("-id") + 1], "CVE-2024-0001,CVE-2024-0002")
+
+    def test_no_cve_id_keeps_tags(self):
+        cmd = self._cmd({"tags": "cve,exposure"})
+        self.assertIn("-tags", cmd)
+        self.assertNotIn("-id", cmd)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -22,12 +22,20 @@ class NucleiAdapter(Adapter):
     def command(self, action: Action) -> list[str]:
         args = action.args
         cmd = ["nuclei", "-u", action.target, "-jsonl", "-silent", "-no-color"]
+        cve_id = args.get("cve_id")
+        ids = ""
+        if cve_id:
+            ids = cve_id if isinstance(cve_id, str) else ",".join(str(c) for c in cve_id)
         if action.capability == "misconfig_scan":
             cmd += ["-tags", args.get("tags", "misconfig,exposure")]
         elif action.capability == "web_template":
-            cmd += ["-tags", args.get("tags", "cve,exposure")]
+            if not ids:
+                cmd += ["-tags", args.get("tags", "cve,exposure")]
         else:
-            cmd += ["-severity", args.get("severity", "low,medium,high,critical")]
+            if not ids:
+                cmd += ["-severity", args.get("severity", "low,medium,high,critical")]
+        if ids:
+            cmd += ["-id", ids]
         if args.get("templates"):
             cmd += ["-t", str(args["templates"])]
         if args.get("rate_limit"):

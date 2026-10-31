@@ -96,20 +96,65 @@ def _print_plan(p: Plan, as_json: bool) -> None:
         print(f"  not: {note}")
 
 
+def _augment_from_feed(args, intent: Intent) -> Intent:
+    """--from-feed verildiyse canli CVE onerilerinden playbook'u olan
+    teknikleri niyete ekle. Oneriler yalnizca TEKNIK ekler; her sey yine
+    Scope/Policy/Audit kapisindan gecer. Besleme bos/erisilemezse niyet
+    degismeden doner."""
+    if not getattr(args, "from_feed", False):
+        return intent
+    try:
+        from .feeds import suggest
+        min_score = getattr(args, "feed_min_score", None) or 40.0
+        sugg = suggest.suggest_for_text(
+            args.text or intent.objective, targets=intent.targets, min_score=min_score
+        )
+    except Exception as exc:  # noqa: BLE001 - besleme yoklugu plani bozmasin
+        return Intent(
+            objective=intent.objective, targets=intent.targets,
+            techniques=intent.techniques, rationale=intent.rationale,
+            source=intent.source, notes=(*intent.notes, f"besleme atlandi: {exc}"),
+        )
+    if not sugg:
+        return Intent(
+            objective=intent.objective, targets=intent.targets,
+            techniques=intent.techniques, rationale=intent.rationale,
+            source=intent.source, notes=(*intent.notes, "besleme: eslesen CVE onerisi yok"),
+        )
+    extra = [t for t in suggest.techniques_from_suggestions(sugg) if t not in intent.techniques]
+    cve_notes = [f"besleme: {s.cve} ({s.tier}{', KEV' if s.kev else ''}) -> {', '.join(s.techniques) or '-'}"
+                 for s in sugg]
+    nuclei_techs = {pb.technique for pb in mapping.all_playbooks()
+                    for s in pb.steps if s.tool == "nuclei"}
+    cve_ids = [s.cve for s in sugg if set(s.techniques) & nuclei_techs]
+    if cve_ids:
+        setattr(args, "feed_cve_id", ",".join(dict.fromkeys(cve_ids)))
+        cve_notes.append(f"besleme: nuclei -id -> {', '.join(dict.fromkeys(cve_ids))}")
+    return Intent(
+        objective=intent.objective,
+        targets=intent.targets,
+        techniques=(*intent.techniques, *extra),
+        rationale=intent.rationale,
+        source=intent.source,
+        notes=(*intent.notes, *cve_notes),
+    )
+
+
 def _intent_from_args(args) -> Intent:
     if args.technique:
         targets = tuple(t for t in ([args.target] if args.target else []))
-        return Intent(
+        intent = Intent(
             objective=args.text or "",
             targets=targets,
             techniques=tuple(args.technique),
             rationale="kullanıcı doğrudan belirtti",
             source="explicit",
         )
-    if not args.text:
+        return _augment_from_feed(args, intent)
+    if not args.text and not getattr(args, "from_feed", False):
         raise SystemExit("metin veya --technique gerekli")
     router = Router(endpoint=args.endpoint, model=args.model)
-    intent = router.route(args.text)
+    intent = router.route(args.text or "")
     if args.target:
         intent = Intent(
             objective=intent.objective,
@@ -119,7 +164,7 @@ def _intent_from_args(args) -> Intent:
             source=intent.source,
             notes=intent.notes,
         )
-    return intent
+    return _augment_from_feed(args, intent)
 
 
 def _build_plans(args, intent: Intent) -> list[Plan]:
@@ -136,6 +181,9 @@ def _build_plans(args, intent: Intent) -> list[Plan]:
         value = getattr(args, key, None)
         if value:
             overrides[key] = value
+    feed_cve = getattr(args, "feed_cve_id", None)
+    if feed_cve:
+        overrides["cve_id"] = feed_cve
 
     return plan_for_intent(intent, registry, max_risk, overrides)
 
@@ -323,18 +371,25 @@ def _knowledge_atlas(args, query: str, cache_root: str | None) -> int:
 def cmd_router(args) -> int:
     router = Router(endpoint=args.endpoint, model=args.model)
     intent = router.route(args.text)
-    print(json.dumps(
-        {
-            "objective": intent.objective,
-            "targets": list(intent.targets),
-            "techniques": list(intent.techniques),
-            "rationale": intent.rationale,
-            "source": intent.source,
-            "notes": list(intent.notes),
-        },
-        ensure_ascii=False,
-        indent=2,
-    ))
+    out: dict[str, Any] = {
+        "objective": intent.objective,
+        "targets": list(intent.targets),
+        "techniques": list(intent.techniques),
+        "rationale": intent.rationale,
+        "source": intent.source,
+        "notes": list(intent.notes),
+    }
+    if not getattr(args, "no_suggest", False):
+        try:
+            from .feeds import suggest
+            sugg = suggest.suggest_for_text(args.text, targets=intent.targets)
+            if sugg:
+                out["live_suggestions"] = [s.to_dict() for s in sugg]
+                extra = suggest.techniques_from_suggestions(sugg)
+                out["suggested_techniques"] = [t for t in extra if t not in intent.techniques]
+        except Exception as exc:  # noqa: BLE001 - oneri yoklugu router'i bozmasin
+            out.setdefault("notes", []).append(f"oneri katmani atlandi: {exc}")
+    print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -568,6 +623,148 @@ def cmd_vuln(args) -> int:
     return 2
 
 
+def _feed_config(args) -> "Any":
+    from .feeds import FeedConfig
+
+    cfg = FeedConfig()
+    if getattr(args, "vuln_interval", None):
+        cfg.vuln_interval = args.vuln_interval
+    if getattr(args, "attack_interval", None):
+        cfg.attack_interval = args.attack_interval
+    if getattr(args, "atlas_interval", None):
+        cfg.atlas_interval = args.atlas_interval
+    if getattr(args, "days", None):
+        cfg.vuln_days = args.days
+    cfg.with_kev = not getattr(args, "no_kev", False)
+    cfg.with_epss = not getattr(args, "no_epss", False)
+    return cfg
+
+
+def cmd_feed(args) -> int:
+    from .feeds import FanOut, FeedDaemon, JsonlSink, StdoutSink, WebhookSink
+    from .feeds.events import FeedEvent
+
+    action = args.action
+
+    if action == "stream":
+        sink = JsonlSink()
+        kinds = set(args.kind) if args.kind else None
+        tier_rank = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        floor = tier_rank.get(args.min_tier, 0) if args.min_tier else 0
+        try:
+            for ev in sink.follow(from_start=args.from_start):
+                if kinds and ev.kind not in kinds:
+                    continue
+                if ev.tier and tier_rank.get(ev.tier, 0) < floor and ev.kind != "cve.kev":
+                    continue
+                sys.stdout.write(ev.to_json() + "\n")
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            print("\nakis durduruldu", file=sys.stderr)
+        return 0
+
+    if action == "tail":
+        sink = JsonlSink()
+        events = sink.tail(limit=args.limit)
+        if args.json:
+            print(json.dumps([__import__("dataclasses").asdict(e) for e in events], ensure_ascii=False, indent=2))
+        else:
+            for e in events:
+                mark = "!" if e.kind == "cve.kev" else ("*" if e.kind == "cve.critical" else " ")
+                ident = e.id or e.source
+                print(f"{mark} {e.ts}  {e.kind:<16} {ident:<18} {e.title[:70]}")
+        return 0
+
+    if action == "status":
+        daemon = FeedDaemon(config=_feed_config(args))
+        st = daemon.status()
+        if args.json:
+            print(json.dumps(st, ensure_ascii=False, indent=2))
+        else:
+            pid = st.get("pid")
+            print(f"daemon       : {'calisiyor (pid ' + str(pid) + ')' if pid else 'calismiyor'}")
+            print(f"baslama      : {st.get('started_at', '-')}")
+            print(f"vuln senkron : {st.get('vuln_synced', '-')}")
+            print(f"attack sync  : {st.get('enterprise_synced', '-')}")
+            print(f"atlas sync   : {st.get('atlas_synced', '-')}")
+            store = st.get("store", {})
+            print(f"CVE deposu   : {store.get('cve_count', 0)} (KEV {store.get('kev_in_store', 0)}, "
+                  f"kritik {store.get('critical', 0)}, high {store.get('high', 0)})")
+        return 0
+
+    if action == "stop":
+        daemon = FeedDaemon()
+        pid = daemon._running_pid()
+        if not pid:
+            print("calisan daemon yok")
+            return 0
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"daemon durduruldu (pid {pid})")
+        except (OSError, ProcessLookupError) as exc:
+            print(f"durdurulamadi: {exc}", file=sys.stderr)
+            return 1
+        daemon._clear_pid()
+        return 0
+
+    if action == "start":
+        daemon = FeedDaemon()
+        if daemon._running_pid():
+            print(f"daemon zaten calisiyor (pid {daemon._running_pid()})", file=sys.stderr)
+            return 1
+        import subprocess
+        cmd = [sys.executable, "-m", "kalkan.cli", "feed", "run"]
+        for flag, val in (("--vuln-interval", args.vuln_interval),
+                          ("--attack-interval", args.attack_interval),
+                          ("--atlas-interval", args.atlas_interval)):
+            if val:
+                cmd += [flag, str(val)]
+        if getattr(args, "no_kev", False):
+            cmd.append("--no-kev")
+        if getattr(args, "no_epss", False):
+            cmd.append("--no-epss")
+        if args.webhook:
+            cmd += ["--webhook", args.webhook]
+        kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | 0x00000008
+            )
+        else:
+            kwargs["start_new_session"] = True
+        log = (FeedDaemon().home / "daemon.log").open("a", encoding="utf-8")
+        subprocess.Popen(cmd, stdout=log, stderr=log, stdin=subprocess.DEVNULL, **kwargs)
+        print("daemon baslatildi (arka plan). Akis icin: kalkan feed stream")
+        return 0
+
+    if action == "run":
+        sinks: list[Any] = [JsonlSink()]
+        if args.stdout:
+            sinks.append(StdoutSink())
+        if args.webhook:
+            sinks.append(WebhookSink(args.webhook, min_tier=args.min_tier or "high"))
+        sink = sinks[0] if len(sinks) == 1 else FanOut(*sinks)
+        daemon = FeedDaemon(config=_feed_config(args), sink=sink)
+        max_cycles = 1 if args.once else args.max_cycles
+        if not args.once:
+            cfg = daemon.config
+            print(f"feed daemon calisiyor — vuln/{cfg.vuln_interval}s, "
+                  f"attack/{cfg.attack_interval}s, atlas/{cfg.atlas_interval}s "
+                  f"(Ctrl+C ile dur)", file=sys.stderr)
+        try:
+            res = daemon.run(once=args.once, max_cycles=max_cycles)
+        except KeyboardInterrupt:
+            print("\ndaemon durduruldu", file=sys.stderr)
+            return 0
+        if args.once:
+            print(f"tek tur tamamlandi ({res['cycles']} dongu)")
+        return 0
+
+    print(f"Bilinmeyen feed eylemi: {action}", file=sys.stderr)
+    return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kalkan",
@@ -632,10 +829,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_vuln.add_argument("--max-cycles", type=int, default=None, help="watch: maksimum döngü sayısı (None = sonsuz)")
     p_vuln.set_defaults(func=cmd_vuln)
 
+    p_feed = sub.add_parser("feed", help="canli besleme (ATT&CK/ATLAS + CVE/CVSS/KEV akisi)")
+    p_feed.add_argument(
+        "action",
+        choices=["run", "start", "stop", "status", "stream", "tail"],
+        help="run=on planda daemon, start=arka planda, stream=canli akis, tail=son olaylar",
+    )
+    p_feed.add_argument("--once", action="store_true", help="run: tek tur (test/CI)")
+    p_feed.add_argument("--max-cycles", type=int, default=None, help="run: maksimum dongu")
+    p_feed.add_argument("--vuln-interval", type=int, default=None, help="CVE tazeleme periyodu (sn)")
+    p_feed.add_argument("--attack-interval", type=int, default=None, help="ATT&CK tazeleme periyodu (sn)")
+    p_feed.add_argument("--atlas-interval", type=int, default=None, help="ATLAS tazeleme periyodu (sn)")
+    p_feed.add_argument("--days", type=int, default=None, help="her turda cekilecek CVE gun araligi")
+    p_feed.add_argument("--no-kev", action="store_true", help="KEV senkronunu kapat")
+    p_feed.add_argument("--no-epss", action="store_true", help="EPSS senkronunu kapat")
+    p_feed.add_argument("--stdout", action="store_true", help="run: olaylari stdout'a da bas")
+    p_feed.add_argument("--webhook", default="", help="kritik/KEV olaylarini bu URL'ye POST et")
+    p_feed.add_argument("--from-start", action="store_true", help="stream: bastan oku")
+    p_feed.add_argument("--kind", action="append", default=[], help="stream: olay turu filtresi (tekrarlanabilir)")
+    p_feed.add_argument("--min-tier", default="", choices=["", "info", "low", "medium", "high", "critical"])
+    p_feed.add_argument("--limit", type=int, default=20, help="tail: olay sayisi")
+    p_feed.add_argument("--json", action="store_true")
+    p_feed.set_defaults(func=cmd_feed)
+
     p_router = sub.add_parser("router", help="modelin niyet çıkarımını gör")
     p_router.add_argument("text")
     p_router.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     p_router.add_argument("--model", default=DEFAULT_MODEL)
+    p_router.add_argument("--no-suggest", action="store_true", help="canli besleme onerilerini kapat")
     p_router.set_defaults(func=cmd_router)
 
     for name, func, help_text in (
@@ -645,6 +866,10 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("text", nargs="?", default="")
         p.add_argument("--technique", action="append", default=[], help="teknik kimliği (tekrarlanabilir)")
+        p.add_argument("--from-feed", action="store_true",
+                       help="canli CVE beslemesinden eslesen playbook tekniklerini plana ekle")
+        p.add_argument("--feed-min-score", type=float, default=40.0,
+                       help="--from-feed: minimum CVE oncelik skoru (varsayilan 40)")
         p.add_argument("--tactic", default=None)
         p.add_argument("--target", default=None)
         p.add_argument("--max-risk", default="intrusive", choices=["passive", "active", "intrusive", "destructive"])
