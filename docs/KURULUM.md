@@ -61,6 +61,45 @@ her komutta `--model` ve `--endpoint` ile geçersiz kılınabilir.
 
 ---
 
+## 3.5 Metasploit (saldırı katmanı) — WSL2 önerilir
+
+Gerçek istismar adımları (`exploit_run`, `exploit_check`, `auxiliary_scan`)
+Metasploit gerektirir. Windows'ta Defender/MDM kurulumu sık sık engeller
+(msf dosyaları HackTool imzası taşır); **en dertsiz yol WSL2'dir** ve Kalkan
+bunu otomatik kullanır.
+
+```powershell
+# 1) WSL + Ubuntu (bir kez; sonra yeniden başlatma gerekebilir)
+wsl --install -d Ubuntu
+```
+```bash
+# 2) Ubuntu içinde Metasploit (resmi omnibus)
+curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/templates/metasploit-framework-wrappers/msfupdate.erb > msfinstall
+chmod +x msfinstall && sudo ./msfinstall
+msfconsole        # ilk açılışta veritabanı sorar → "yes"; açılınca "exit"
+```
+```powershell
+# 3) Windows tarafında doğrula (yeni terminal)
+kalkan tools      # msf artık "hazır" görünmeli
+```
+
+Kalkan `msfconsole`'u önce **Windows PATH**'inde arar; bulamazsa **WSL
+dağıtımlarını** tarar (docker-desktop gibi özel dağıtımları atlar) ve
+msfconsole'u olan ilk gerçek dağıtımı seçip `wsl -d <distro> -e msfconsole`
+ile çalıştırır; rc/spool yollarını `wslpath` ile çevirir. Hiçbir ayar
+gerekmez.
+
+> **Reverse shell ağı:** WSL2'nin kendi IP'si vardır. Win11 22H2+ için
+> `C:\Users\<kullanıcı>\.wslconfig` içine `[wsl2]` + `networkingMode=mirrored`
+> koyup `wsl --shutdown` yaparsan `lhost` = Windows makinenin IP'si olur.
+
+> Windows'a native kurmakta ısrar edersen: Defender → Koruma geçmişi'nden
+> Metasploit tespitine "Cihazda izin ver" + `C:\metasploit-framework` ve
+> `%TEMP%` klasör istisnaları gerekir; MDM yönetilen cihazda bu çoğu zaman
+> mümkün olmaz → WSL2'ye dön.
+
+---
+
 ## 4. Kurulumdan sonra ilk kontrol
 
 ```powershell
@@ -74,14 +113,19 @@ python -m kalkan.cli --scope examples/scope.json tools
 Kalkan ATT&CK ve ATLAS bilgi tabanlarını resmi STIX dağıtımlarından indirip `~/.kalkan/` altına önbellekler:
 
 ```powershell
-# ATT&CK enterprise (~55 MB)
+# ATT&CK enterprise (~55 MB): TAM icerik — 227 teknik + 479 alt, 15 taktik,
+# 268 mitigasyon, ~17.600 prosedur ornegi (aciklama/nasil-yapildigi + tespit)
 python -m kalkan.cli knowledge fetch
+
+# Diger ATT&CK matrisleri (istege bagli)
+python -m kalkan.cli knowledge fetch --domain mobile   # 78+47 teknik
+python -m kalkan.cli knowledge fetch --domain ics      # 78+26 teknik
 
 # ATLAS tam katalog (~1.6 MB): teknik + mitigation + case study
 python -m kalkan.cli knowledge fetch --domain atlas
 
-# kontrol: bir teknik goster
-python -m kalkan.cli knowledge show --technique T1046
+# kontrol: bir teknigin TAM icerigini goster (mitigasyon + prosedur ornekleri)
+python -m kalkan.cli knowledge show --technique T1190
 python -m kalkan.cli knowledge show --domain atlas --technique AML.T0051
 ```
 
