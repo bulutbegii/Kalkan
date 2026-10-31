@@ -179,6 +179,8 @@ kalkan exploit 10.10.10.20 exploit/windows/smb/ms17_010_eternalblue --dry-run
 
 Inside `chat` the same flow is `/cve CVE-2017-0144` (inspect + resolve module) then `/exploit CVE-2017-0144` (check) or `/exploit CVE-2017-0144 run` (after `/allow destructive on`). After any scan, correlation remembers the top MSF-backed CVE so a bare `/exploit` retries it.
 
+Every run drives the module in detail: the generated resource script runs `info` and `show options` (plus `show advanced` when a payload is set) before `check`/`exploit`, and on a real exploit it lists sessions and runs safe recon (`sysinfo`, `getuid`, `ipconfig`, `route`, `ps`). The result is printed back in full — module name, rank, disclosure date, the explicit vulnerability verdict, any opened sessions and the console tail — and the complete console is saved as loot under the report. Each turn also ends with a summary: the local Ollama model writes it when online, otherwise a deterministic summary is built directly from the findings, so you always get one.
+
 ### Web exploitation (sqlmap / dalfox / IDOR)
 
 The `T1190` playbook contains `sqli_check`, `sqli_dump`, `xss_scan`, `idor_probe` and the MSF steps. The risky ones are **opt-in** — they only join the plan when armed:

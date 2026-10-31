@@ -31,7 +31,7 @@ from ..registry import ToolSpec
 from ._common import read_text
 from .base import Adapter
 
-_DEFAULT_POST = "sysinfo; getuid; getpid"
+_DEFAULT_POST = "sysinfo; getuid; getpid; ifconfig; route; ps"
 
 
 class MetasploitAdapter(Adapter):
@@ -134,7 +134,9 @@ class MetasploitAdapter(Adapter):
         lines: list[str] = []
         if spool:
             lines.append(f"spool {spool}")
-        lines += [f"use {module}", f"set RHOSTS {action.target}"]
+        lines += [f"use {module}"]
+        lines.append("info")
+        lines += [f"set RHOSTS {action.target}"]
         if args.get("rport"):
             lines.append(f"set RPORT {args['rport']}")
         if args.get("payload"):
@@ -146,6 +148,9 @@ class MetasploitAdapter(Adapter):
         for key, value in (args.get("options") or {}).items():
             lines.append(f"set {key} {value}")
         lines += ["set VERBOSE false", "set ExitOnSession false", "set THREADS 1"]
+        lines.append("show options")
+        if args.get("payload"):
+            lines.append("show advanced")
         if mode == "run":
             lines.append("exploit -z -j" if args.get("payload") else "exploit -z")
             lines.append("sleep 3")
@@ -222,12 +227,33 @@ class MetasploitAdapter(Adapter):
             for line in (stdout or "").splitlines()
             if line.strip().lower().startswith(("meterpreter session", "command shell session"))
         ]
+        rank = module_name = disclosure = ""
+        check_line = ""
+        for raw in (stdout or "").splitlines():
+            line = raw.strip()
+            low = line.lower()
+            if low.startswith("rank:") and not rank:
+                rank = line.split(":", 1)[1].strip()
+            elif low.startswith("name:") and not module_name:
+                module_name = line.split(":", 1)[1].strip()
+            elif low.startswith("disclosure date:") and not disclosure:
+                disclosure = line.split(":", 1)[1].strip()
+            if not check_line and any(
+                m in low for m in ("the target", "appears to be", "is vulnerable",
+                                    "does not appear", "cannot reliably")):
+                if "[" in line or "vulnerable" in low or "appear" in low:
+                    check_line = line
         out: dict[str, Any] = {
             "module": action.args.get("module", ""),
+            "module_name": module_name,
+            "rank": rank,
+            "disclosure": disclosure,
+            "check_line": check_line,
             "mode": mode,
             "vulnerable": vulnerable,
             "sessions": sessions,
             "session_count": len(sessions),
+            "console": stdout or "",
             "completed": any(
                 m in text for m in (
                     "auxiliary module execution completed",
@@ -236,9 +262,10 @@ class MetasploitAdapter(Adapter):
                 )
             ),
         }
-        if mode == "run" and stdout and stdout.strip():
+        if stdout and stdout.strip():
             out["loot_text"] = stdout
-            out["loot_name"] = f"msf_{action.args.get('module', 'module').replace('/', '_')}"
+            out["loot_name"] = f"msf_{mode}_{action.args.get('module', 'module').replace('/', '_')}"
+        if mode == "run" and stdout and stdout.strip():
             if sessions:
                 findings = [{
                     "severity": "critical",

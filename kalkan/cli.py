@@ -135,6 +135,117 @@ def _progress_event(evt: str, idx: int, total: int, action: Action, result) -> N
         print(ui.dim(f"       {prev[:300]}{'...' if len(prev) > 300 else ''}"))
 
 
+_SEV_RANK_G = {"critical": 4, "high": 3, "medium": 2, "low": 1,
+               "info": 0, "unknown": 0, "": 0}
+_BAD_STATUS = ("error", "denied", "unavailable", "aborted")
+
+
+def _fallback_summary(plan: Plan, results: list) -> str:
+    """Model çevrimdışıyken bile üretilen DETERMİNİSTİK Türkçe özet.
+
+    router.summarize() yalnızca Ollama online iken çalışır; o yoksa veya boş
+    dönerse kullanıcı özet göremiyordu ('özet dönmedi'). Bu fonksiyon sonuçlardan
+    doğrudan okunabilir bir özet kurar: kaç adım, somut bulgular, erişim/zafiyet
+    durumu ve en kritik birkaç bulgu."""
+    all_findings: list[dict] = []
+    highlights: list[str] = []
+    for r in results:
+        p = r.parsed or {}
+        a = r.action
+        if p.get("open_ports"):
+            ports = ", ".join(str(x) for x in p["open_ports"][:8])
+            highlights.append(f"{len(p['open_ports'])} açık port ({ports})")
+        techs = p.get("technologies")
+        if techs:
+            names = list(techs)
+            if names:
+                highlights.append(f"teknoloji: {', '.join(map(str, names[:5]))}")
+        if p.get("vulnerable"):
+            highlights.append(f"{a.tool}: zafiyet DOĞRULANDI")
+        if p.get("session_count"):
+            highlights.append(f"{p['session_count']} oturum AÇILDI — erişim sağlandı")
+        if p.get("dumped"):
+            highlights.append("veri çekildi (DB içeriği loot olarak kaydedildi)")
+        if p.get("known_vulns"):
+            highlights.append(f"bilinen CVE: {', '.join(p['known_vulns'][:5])}")
+        all_findings.extend(p.get("findings") or [])
+    by_sev: dict[str, int] = {}
+    for f in all_findings:
+        s = str(f.get("severity", "info")).lower()
+        by_sev[s] = by_sev.get(s, 0) + 1
+    good = [r for r in results if r.status not in _BAD_STATUS and r.status != "dry-run"]
+    bad = [r for r in results if r.status in _BAD_STATUS]
+    parts = [f"{len(results)} adım çalıştı; {len(good)} başarılı"
+             + (f", {len(bad)} sonuçsuz/engelli" if bad else "") + "."]
+    if all_findings:
+        sev_txt = ", ".join(f"{by_sev[s]} {s}" for s in
+                            sorted(by_sev, key=lambda k: -_SEV_RANK_G.get(k, 0)))
+        parts.append(f"{len(all_findings)} bulgu ({sev_txt}).")
+    else:
+        parts.append("doğrulanmış bulgu yok.")
+    if highlights:
+        parts.append("Öne çıkan: " + "; ".join(dict.fromkeys(highlights)) + ".")
+    top = sorted(all_findings,
+                 key=lambda f: _SEV_RANK_G.get(str(f.get("severity", "")).lower(), 0),
+                 reverse=True)[:4]
+    for f in top:
+        sev = str(f.get("severity", "info")).lower()
+        label = f.get("detail") or f.get("name") or f.get("check") or "bulgu"
+        loc = (f.get("matched_at") or f.get("url") or f.get("parameter")
+               or f.get("header") or "")
+        bit = f"  • [{sev}] {label}"
+        cve = f.get("cve")
+        if cve:
+            bit += f" ({cve})"
+        if loc and str(loc) not in str(label):
+            bit += f" → {loc}"
+        parts.append(bit)
+    if any((r.parsed or {}).get("vulnerable") for r in results):
+        parts.append("  → Doğrulanan zafiyet için: /exploit <CVE> (check) · ... run (gerçek).")
+    return "\n".join(parts)
+
+
+def _print_msf_details(results: list) -> None:
+    """MSF (exploit_check/run, auxiliary) sonuçlarını DETAYLI bas.
+
+    Önceden msf çıktısı kullanıcıya hiç gösterilmiyordu ('detaylı msf kullanımı
+    yok'); modül meta verisi, check kararı, oturumlar ve konsol dökümünün özü
+    burada yazılır. Tam döküm rapor loot'una kaydedilir."""
+    for r in results:
+        a = r.action
+        if a.tool != "msf" or r.status == "dry-run":
+            continue
+        p = r.parsed or {}
+        print(f"\n  {ui.bold('MSF')} · {ui.cyan(p.get('module') or a.target)}  "
+              f"[{a.capability} / {p.get('mode', '?')}]  → {ui.status(r.status)}")
+        meta = []
+        if p.get("module_name"):
+            meta.append(p["module_name"])
+        if p.get("rank"):
+            meta.append(f"rank={p['rank']}")
+        if p.get("disclosure"):
+            meta.append(f"ifşa={p['disclosure']}")
+        if meta:
+            print(ui.dim("    " + "  ".join(meta)))
+        if p.get("check_line"):
+            verdict = p["check_line"]
+            col = ui.green if "is vulnerable" in verdict.lower() or "appears" in verdict.lower() else ui.dim
+            print("    karar: " + col(verdict))
+        elif "vulnerable" in p:
+            print("    karar: " + (ui.green("HEDEF ZAFİYETLİ") if p.get("vulnerable")
+                                   else ui.dim("zafiyet doğrulanamadı")))
+        for s in p.get("sessions") or []:
+            print("    " + ui.red("OTURUM: ") + s)
+        console = p.get("console") or p.get("loot_text") or ""
+        if console.strip():
+            lines = [ln for ln in console.splitlines() if ln.strip()]
+            tail = lines[-12:]
+            if tail:
+                print(ui.dim("    konsol (son satırlar):"))
+                for ln in tail:
+                    print(ui.dim(f"      {ln[:160]}"))
+
+
 def _augment_from_feed(args, intent: Intent) -> Intent:
     """--from-feed verildiyse canli CVE onerilerinden playbook'u olan
     teknikleri niyete ekle. Oneriler yalnizca TEKNIK ekler; her sey yine
@@ -740,6 +851,9 @@ def cmd_exploit(args) -> int:
     except PolicyDenied as exc:
         print(f"\n{ui.red('POLİTİKA REDDİ')}: {exc}", file=sys.stderr)
         return 2
+    _print_msf_details(results)
+    if not getattr(args, "no_summary", False):
+        print("\n  🗒  " + _fallback_summary(plan, results).replace("\n", "\n      "))
     print(f"\n  {ui.grey('denetim kaydı:')} {args.audit}")
     bad = [r for r in results if r.status in ("error", "denied", "aborted", "unavailable")]
     return 1 if bad else 0
@@ -895,11 +1009,17 @@ def cmd_chat(args) -> int:
                   f" {ui.dim('(denetim kaydına yazıldı)')}")
             return
         ozet = ""
-        if state["summary"] and online:
-            print(ui.dim("\n  ... özet hazırlanıyor"))
-            ozet = router.summarize(_summary_digest(user_text, plan, results), timeout=240)
+        if state["summary"]:
+            if online:
+                print(ui.dim("\n  ... özet hazırlanıyor"))
+                ozet = router.summarize(_summary_digest(user_text, plan, results), timeout=240)
+            if not ozet:
+                ozet = _fallback_summary(plan, results)
+                if online:
+                    print(ui.dim("  (model özeti boş döndü → yerel özet)"))
             if ozet:
                 print("  🗒  " + ozet.replace("\n", "\n      "))
+        _print_msf_details(results)
         kor = correlate.correlate(results) if not args.dry_run else []
         _print_correlation(kor)
         for c in kor:
