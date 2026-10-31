@@ -47,29 +47,65 @@ Kalkan bu üçünü yapısal olarak keser:
 
 ## 2. Kurulum
 
-Dış bağımlılık **yok** (yalnızca Python 3.11+ standart kütüphanesi).
+Çekirdeğin dış bağımlılığı **yok** (yalnızca Python 3.11+ standart kütüphanesi). Harici tarama araçları (nmap, nuclei…) isteğe bağlıdır — bkz. §4.
 
 ```powershell
-cd C:\Projects\kalkan
-python -m kalkan.cli --help
-```
-
-Kalıcı komut istiyorsan:
-
-```powershell
-pip install -e .
+cd C:\Users\<kullanici>\kalkan
+pip install -e .        # 'kalkan' komutunu PATH'e kurar (önerilir)
 kalkan --help
 ```
 
-> `kalkan` paketi kurulmadan da çalışır; komutları **proje kökünden** `python -m kalkan.cli ...` şeklinde çalıştır.
+> Kurmadan da çalışır: proje kökünden `python -m kalkan.cli ...`.
+
+### Masaüstü kısayolu (cd/komut ezberlemeden)
+
+`Kalkan.bat` çift tıklanınca menü arayüzünü açar; kendi klasörüne geçip
+araç yollarını ve API anahtarlarını (registry'den) otomatik yükler, yani
+"stale terminal" sorunundan etkilenmez. Masaüstüne `Kalkan.lnk` kısayolu
+oluşturup bu `.bat`'i hedef gösterebilirsin.
+
+### Üç kullanım biçimi
+
+| Biçim | Komut | Ne zaman |
+|---|---|---|
+| **Menü arayüzü** | `kalkan` (argümansız) | Ne yaptığını görüp seçerek ilerlemek |
+| **Sohbet (REPL)** | `kalkan chat --target <hedef>` | Modelle konuşarak tarama/plan |
+| **Tek komut** | `kalkan run --technique … --target …` | Betik/otomasyon |
 
 ---
 
 ## 3. Hızlı başlangıç (5 dakika)
 
+### 3.0 Sohbetle kullanım (önerilen)
+
+```powershell
+kalkan chat --target example.com
+```
+
+```
+kalkan(example.com)> web uygulamasını tara
+   ... model düşünüyor → plan → passive/active OTOMATIK çalışır
+   🗒  (Türkçe özet + "Sonraki adım:" önerisi)
+   rapor: reports\example.com_20261031-152033.md
+```
+
+Risk modeli: **passive/active otomatik**, **intrusive/destructive satır-içi onay** ister.
+Slash komutları: `/target`, `/risk`, `/auto`, `/ozet`, `/plan`, `/feed`, `/scope [add <hedef>]`, `/help`, `/quit`.
+Başlatma bayrakları: `--from-feed` (canlı CVE önerileri), `--dry-run`, `--max-risk`, `--no-summary`, `--no-report`.
+
 ### 3.1 Kapsam dosyası
 
-`examples/scope.json` dosyasını kopyala, kendi laboratuvarına göre düzenle:
+`examples/scope.json` dosyasını kopyala (`scope.json` olarak), kendi laboratuvarına göre düzenle.
+Hedef eklemenin hızlı yolu — elle JSON açmadan:
+
+```powershell
+kalkan scope add example.com        # domain/ip/cidr otomatik ayrılır
+kalkan scope show
+```
+
+> `scope add`, o hedefi test etmeye **yetkili olduğun beyanıdır**; Kalkan bu beyana güvenir.
+
+Örnek kapsam:
 
 ```json
 {
@@ -130,31 +166,71 @@ python -m kalkan.cli audit verify --audit .kalkan/audit.jsonl
 python -m kalkan.cli audit tail --count 5
 ```
 
+### 3.7 Tarama raporları (otomatik)
+
+Her **gerçek** çalıştırmadan sonra (sohbet, `run`, menü "Web uygulama taraması")
+bir Markdown rapor yazılır:
+
+```
+reports/<hedef>_<YYYYAAGG-SSDDSS>.md
+```
+
+İçerik: plan adımları tablosu · adım sonuçları · keşifler (açık portlar, WAF,
+bulgular) · (sohbette) model özeti · plan notları. Hedef+tarih isimlendirme
+geçmişe dönük arşiv verir. `--dry-run`'da yazılmaz, `--no-report` ile kapatılır.
+`reports/` git'e girmez (hedef bilgisi içerir).
+
+### 3.8 Canlı besleme — CVE/CVSS + ATT&CK/ATLAS akışı
+
+NVD + CISA KEV + FIRST EPSS'i birleştirip 0–100 öncelik skoruyla izler;
+CVE'yi CWE→ATT&CK tekniği→playbook'a köprüler.
+
+```powershell
+kalkan feed run --once          # tek senkron (NVD_API_KEY ile hız limiti açılır)
+kalkan feed start               # arka plan daemon
+kalkan feed stream              # canlı NDJSON olay akışı (tail -f)
+kalkan feed tail                # son olaylar
+kalkan feed status              # depo/daemon durumu
+```
+
+Plan/sohbette `--from-feed`: hedefe/ürüne dair trend KEV/kritik CVE'leri
+tekniklere çevirip plana önerir; eşleşen CVE'yi nuclei `-id` ve (varsa) MSF
+`module=` argümanına bağlar.
+
 ---
 
 ## 4. Araçları devreye alma
 
-Hiçbiri zorunlu değil; kurdukça `coverage` yeşile döner.
+Hiçbiri zorunlu değil; kurdukça `kalkan tools` / `coverage` yeşile döner. Araç yoksa adım `unavailable`/`dry-run`'a düşer — sessizce yanlış sonuç üretmez.
 
 | Araç | Kurulum (Windows) | Ne açar |
 |---|---|---|
-| **nmap** | `winget install Insecure.Nmap` veya [nmap.org/download](https://nmap.org/download) | T1046, T1595, T1592 |
-| **nuclei** | `go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` | T1595.002, T1190 |
-| **Metasploit** | [rapid7.com/products/metasploit/download](https://www.rapid7.com/products/metasploit/download/) (Windows installer) | T1190, T1203 |
-| **Shodan** | `setx SHODAN_API_KEY "..."` (yeni terminal gerekir) | T1590, T1596 |
-| **Ollama** | `winget install Ollama.Ollama` | Router |
+| **nmap** | `winget install Insecure.Nmap` (Npcap dahil) | T1046, T1595, T1592 — port/servis |
+| **nuclei** | GitHub release `.zip` → PATH; sonra `nuclei -update-templates` | T1595.002, T1190 — şablon tarama |
+| **httpx** | ProjectDiscovery GitHub release `.zip` → PATH | T1592 — tech-detect/probe |
+| **ffuf** | `winget install ffuf.ffuf` ya da GitHub release | içerik/parametre keşfi |
+| **dalfox** | GitHub release `.zip` → PATH | XSS (intrusive, opt-in) |
+| **sqlmap** | `pip install sqlmap` | SQLi (intrusive, opt-in) |
+| **wafw00f** | `pip install wafw00f` | WAF/CDN tespiti |
+| **arjun** | `pip install arjun` | parametre keşfi |
+| **nikto** | StrawberryPerl + `sullo/nikto` klonu + `nikto` sarmalayıcısı | web yanlış-yapılandırma |
+| **Metasploit** | [resmi installer](https://windows.metasploit.com/metasploitframework-latest.msi) (Defender istisnası gerekebilir) | T1190, T1203 |
+| **Shodan** | `setx SHODAN_API_KEY "..."` (yeni terminal) | T1590, T1596 — pasif OSINT |
+| **NVD** | `setx NVD_API_KEY "..."` | feed CVE senkron hız limiti |
+| **Ollama** | `winget install Ollama.Ollama` | Router + Türkçe özet |
 
-Doğrulama:
+> **Go araçları (nuclei/httpx/ffuf/dalfox):** Go kuruluysa `go install …@latest`;
+> değilse resmi GitHub release'inden `windows_amd64.zip` indirip içindeki `.exe`'yi
+> PATH'teki bir klasöre (ör. `%USERPROFILE%\tools\bin`) koy.
+> **nuclei** ilk kullanımda şablon ister: `nuclei -update-templates` (GitHub API
+> limiti yerse `git clone https://github.com/projectdiscovery/nuclei-templates`
+> → `%USERPROFILE%\nuclei-templates`).
 
-```powershell
-nmap --version
-nuclei -version
-msfconsole -v
-echo $env:SHODAN_API_KEY
-ollama list
-```
+Doğrulama: `kalkan tools` (hepsini tek bakışta), ya da `nmap --version`, `nuclei -version`, `echo $env:SHODAN_API_KEY`, `ollama list`.
 
-Kurulmayan araç `coverage` çıktısında **eksik** görünür ve `run` sırasında `unavailable` döner — sessizce yanlış sonuç üretmez.
+> **API anahtarları koda/`scope.json`'a değil, ortam değişkenine girer.** `.env`
+> okunmaz; `setx` ile User ortamına yazılır ve **yeni** terminal/kısayol görür.
+> `Kalkan.bat` bunları registry'den kendisi yükler.
 
 ---
 
@@ -314,23 +390,36 @@ kalkan/
 ├─ policy.py            Policy, PolicyDenied (onay eşiği)
 ├─ audit.py             AuditLog (SHA-256 hash zinciri, verify/tail)
 ├─ registry.py          ToolSpec, Registry (yetenek → adaptör)
+├─ report.py            tarama → Markdown rapor (reports/<hedef>_<tarih>.md)
 ├─ adapters/
 │  ├─ base.py           Adapter: command()/parse()/run()/dry_run()
-│  ├─ nmap.py           port_scan, service_version, vuln_script, host_discovery
-│  ├─ nuclei.py         vuln_scan, web_template, misconfig_scan
-│  ├─ shodan.py         passive_osint, host_lookup, exposure_lookup
+│  ├─ nmap.py           port_scan (-sT), service_version, vuln_script, host_discovery
+│  ├─ nuclei.py         vuln_scan, web_template (cve_id→-id), misconfig_scan
+│  ├─ httpx.py          http_probe, tech_detect
+│  ├─ ffuf.py / arjun.py / dalfox.py / nikto.py / wafw00f.py
+│  ├─ webprobe.py       security_headers, cors_check, http_methods, tls_inspect…
+│  ├─ sqlmap.py         sqli_check (opt-in: verify)
+│  ├─ shodan.py         passive_osint (domain→IP), host_lookup, exposure_lookup
 │  ├─ msf.py            exploit_check, auxiliary_scan, exploit_run (.rc üretimi)
-│  └─ llmprobe.py       llm_jailbreak_probe, llm_injection_probe, llm_leak_probe
+│  └─ llmprobe.py       llm_jailbreak_probe, llm_injection_probe, llm_leak_probe…
 ├─ knowledge/
-│  ├─ attack.py         STIX 2.1 yükleyici + yerel önbellek (~/.kalkan/attack)
+│  ├─ attack.py         ATT&CK STIX 2.1 yükleyici + önbellek (~/.kalkan/attack)
 │  ├─ atlas.py          ATLAS kataloğu (otomatik / manuel ayrımı)
 │  ├─ mapping.py        ★ teknik → playbook → adım tablosu
+│  ├─ bridge.py         CVE(CWE) → ATT&CK/ATLAS tekniği + CVE→MSF modülü
+│  ├─ vuln.py / cvss.py CVE/CVSS/EPSS/KEV istihbaratı, öncelik skoru
+│  ├─ rules.py          tespit kuralı kimlikleri
 │  └─ payloads.py       LLM prob korpusu
+├─ feeds/
+│  ├─ events.py         FeedEvent + JSONL/stdout/webhook sinkleri, tail -f
+│  ├─ scheduler.py      FeedDaemon (vuln/attack/atlas bağımsız periyot)
+│  └─ suggest.py        canlı CVE → teknik/MSF önerisi (router/planner)
 ├─ orchestrator/
-│  ├─ router.py         LLM → Intent (JSON şeması + kural yedeği)
+│  ├─ router.py         LLM → Intent (JSON şeması + kural yedeği) + Türkçe özet
 │  ├─ planner.py        Intent → Plan (deterministik)
 │  └─ executor.py       Plan → sonuç (scope → policy → audit → adaptör)
-├─ cli.py               argparse arayüzü
+├─ cli.py               argparse: home, chat, plan, run, scope, feed, vuln, knowledge, …
+├─ Kalkan.bat           masaüstü başlatıcı (menü)
 └─ examples/scope.json
 ```
 
@@ -404,13 +493,14 @@ Kurallar:
 ## 10. Testler
 
 ```powershell
-cd C:\Projects\kalkan
-python -m unittest discover -s tests -t . -v
+python -m pytest tests/ -q          # veya: python -m unittest discover -s tests -t .
 ```
 
-43 test: kapsam kuralları (CIDR/domain/port/süre/risk), denetim zinciri (değiştirme/silme tespiti),
-planlayıcı (risk sıralaması, eksik argüman, deduplikasyon, playbook tutarlılığı) ve executor
-(scope ihlalinde durma, onay reddi, destructive bloğu, bağımlılık çözümü).
+104 test: kapsam kuralları (CIDR/domain/port/süre/risk + `scope add`), denetim zinciri
+(değiştirme/silme tespiti), planlayıcı (risk sıralaması, eksik argüman, deduplikasyon,
+playbook tutarlılığı), executor (scope ihlali, onay reddi, destructive bloğu, bağımlılık
+çözümü), CVE→ATT&CK köprüsü, feed daemon/olay akışı, rapor üretimi, nuclei `cve_id`/nmap
+`-sT`/shodan domain→IP, ve CLI varsayılan-komut/chat-shim davranışı.
 
 ---
 
@@ -427,9 +517,12 @@ planlayıcı (risk sıralaması, eksik argüman, deduplikasyon, playbook tutarl�
 
 ## 12. Yol haritası
 
-- [ ] `ffuf`, `httpx`, `amass` adaptörleri
+- [x] `ffuf`, `httpx`, `dalfox`, `sqlmap`, `wafw00f`, `arjun`, `nikto`, `webprobe` adaptörleri
+- [x] Canlı CVE/CVSS/KEV/EPSS beslemesi + CWE→ATT&CK köprüsü (`feeds/`, `bridge.py`)
+- [x] Sohbet (REPL) + menü arayüzü + masaüstü başlatıcı + Türkçe özet
+- [x] Tarama sonrası otomatik Markdown rapor (`report.py`)
+- [ ] nikto Windows checkout sorunu (symlink/`ö`-profil) kalıcı çözümü
 - [ ] Playbook'ları YAML'dan yükleme (kod değiştirmeden genişletme)
 - [ ] Sonuçları STIX 2.1 bundle olarak dışa aktarma (MISP/OpenCTI)
 - [ ] `audit` kaydını GPG/HSM ile imzalama
-- [ ] Router için yerel değerlendirme seti (niyet doğruluğu ölçümü)
 - [ ] Çoklu hedef için paralel yürütme (şu an sıralı)
