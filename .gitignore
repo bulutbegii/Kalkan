@@ -13,6 +13,10 @@ venv/
 scope.json
 scope.local.json
 
+# Sırlar (API anahtarları env değişkeninde tutulur; .env repoya girmesin)
+.env
+*.env
+
 # Editör
 .vscode/
 .idea/

@@ -9,15 +9,28 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
 
 from ..models import Action, ActionResult, Risk
 from ..registry import ToolSpec
+from ..scope import parse_target
 from .base import Adapter
 
 API = "https://api.shodan.io"
+
+
+def resolve_ip(target: str) -> str:
+    """Shodan host endpoint IP ister; domain/URL verilirse IP'ye çöz.
+
+    'http://a.b:443/x' veya 'a.b' -> gethostbyname; '1.2.3.4' -> aynen.
+    """
+    kind, host, _ = parse_target(target)
+    if kind == "ip":
+        return host
+    return socket.gethostbyname(host)
 
 
 class ShodanAdapter(Adapter):
@@ -49,20 +62,27 @@ class ShodanAdapter(Adapter):
         key = os.environ.get("SHODAN_API_KEY")
         if not key:
             return ActionResult(action=action, status="unavailable", detail="SHODAN_API_KEY yok")
-        url = f"{API}/shodan/host/{action.target}?key={key}"
+        try:
+            ip = resolve_ip(action.target)
+        except (socket.gaierror, OSError, ValueError) as exc:
+            return ActionResult(action=action, status="error", detail=f"hedef IP'ye çözülemedi: {exc}")
+        url = f"{API}/shodan/host/{ip}?key={key}"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            return ActionResult(action=action, status="error", detail=f"HTTP {exc.code}")
+            hint = " (ücretsiz 'oss' planı veya kredi/endpoint kısıtı olabilir)" if exc.code in (401, 403) else ""
+            return ActionResult(action=action, status="error", detail=f"HTTP {exc.code}{hint}")
         except (urllib.error.URLError, TimeoutError) as exc:
             return ActionResult(action=action, status="error", detail=str(exc))
+        parsed = self.parse(json.dumps(payload), action)
+        parsed["resolved_ip"] = ip
         return ActionResult(
             action=action,
             status="ok",
-            command=["GET", f"{API}/shodan/host/{action.target}"],
-            parsed=self.parse(json.dumps(payload), action),
+            command=["GET", f"{API}/shodan/host/{ip}"],
+            parsed=parsed,
         )
 
     def parse(self, stdout: str, action: Action) -> dict[str, Any]:
