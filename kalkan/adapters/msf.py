@@ -17,11 +17,14 @@ Guvenlik tasarimi:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_WSL_ENV = {**os.environ, "WSL_UTF8": "1"}
 
 from ..models import Action, ActionResult, Risk
 from ..registry import ToolSpec
@@ -46,39 +49,55 @@ class MetasploitAdapter(Adapter):
         self._spool: Path | None = None
         self._rc_body = ""
         self._runner_cache: str | None = None
+        self._wsl_distro = ""
+
+    @staticmethod
+    def _wsl(args: list[str], timeout: int = 20) -> subprocess.CompletedProcess:
+        return subprocess.run(["wsl", *args], capture_output=True, text=True,
+                              timeout=timeout, env=_WSL_ENV)
 
     def _runner(self) -> str:
-        """msfconsole nerede? Windows PATH -> 'native'; degilse WSL icinde
-        -> 'wsl'; hicbiri -> ''. Windows'ta Defender/MDM kurulumu engelledigi
-        icin WSL'e kurulan msf de calistirilabilsin diye."""
+        """msfconsole nerede? Windows PATH -> 'native'; degilse msfconsole'u
+        olan bir WSL dagitimi -> 'wsl'; hicbiri -> ''. docker-desktop gibi
+        ozel dagitimlar atlanir; varsayilan dagitim yanlis olsa bile dogru
+        dagitim secilir."""
         if self._runner_cache is not None:
             return self._runner_cache
         if shutil.which("msfconsole"):
             self._runner_cache = "native"
-        elif shutil.which("wsl") and self._wsl_has_msf():
+        elif shutil.which("wsl") and (d := self._find_wsl_distro()):
+            self._wsl_distro = d
             self._runner_cache = "wsl"
         else:
             self._runner_cache = ""
         return self._runner_cache
 
-    @staticmethod
-    def _wsl_has_msf() -> bool:
+    def _find_wsl_distro(self) -> str:
+        """msfconsole kurulu ilk gercek WSL dagitiminin adini dondurur."""
         try:
-            r = subprocess.run(
-                ["wsl", "-e", "sh", "-lc", "command -v msfconsole"],
-                capture_output=True, text=True, timeout=20,
-            )
-            return r.returncode == 0 and bool(r.stdout.strip())
+            r = self._wsl(["-l", "-q"], timeout=15)
+            if r.returncode != 0:
+                return ""
+            names = [n.replace("\x00", "").strip() for n in r.stdout.splitlines()]
         except (OSError, subprocess.SubprocessError):
-            return False
+            return ""
+        for name in names:
+            if not name or name.lower().startswith("docker-desktop"):
+                continue
+            try:
+                c = self._wsl(["-d", name, "-e", "sh", "-lc", "command -v msfconsole"])
+                if c.returncode == 0 and c.stdout.strip():
+                    return name
+            except (OSError, subprocess.SubprocessError):
+                continue
+        return ""
 
     def _to_wsl(self, winpath: Path | str) -> str:
-        """Windows yolunu WSL mount yoluna cevir (C:\\x -> /mnt/c/x)."""
+        """Windows yolunu secili dagitimin mount yoluna cevir (C:\\x -> /mnt/c/x)."""
+        args = (["-d", self._wsl_distro] if self._wsl_distro else []) + \
+               ["-e", "wslpath", "-a", str(winpath)]
         try:
-            r = subprocess.run(
-                ["wsl", "-e", "wslpath", "-a", str(winpath)],
-                capture_output=True, text=True, timeout=15,
-            )
+            r = self._wsl(args, timeout=15)
             if r.returncode == 0 and r.stdout.strip():
                 return r.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -154,7 +173,8 @@ class MetasploitAdapter(Adapter):
         if self._rc is None:
             raise RuntimeError("prepare() çağrılmadan command() kullanılamaz")
         if self._runner() == "wsl":
-            return ["wsl", "-e", "msfconsole", "-q", "-n", "-r", self._to_wsl(self._rc)]
+            distro = ["-d", self._wsl_distro] if self._wsl_distro else []
+            return ["wsl", *distro, "-e", "msfconsole", "-q", "-n", "-r", self._to_wsl(self._rc)]
         return ["msfconsole", "-q", "-n", "-r", str(self._rc)]
 
     def cleanup(self) -> None:
@@ -169,8 +189,11 @@ class MetasploitAdapter(Adapter):
         body = self._build_rc(action, spool="<spool>")
         reason = self.unavailable_reason()
         head = f"[dry-run:{reason}] " if reason else "[dry-run] "
-        launcher = ("wsl -e msfconsole -q -n -r <job.rc>" if self._runner() == "wsl"
-                    else "msfconsole -q -n -r <job.rc>")
+        if self._runner() == "wsl":
+            d = f"-d {self._wsl_distro} " if self._wsl_distro else ""
+            launcher = f"wsl {d}-e msfconsole -q -n -r <job.rc>"
+        else:
+            launcher = "msfconsole -q -n -r <job.rc>"
         return head + launcher + "\n" + body
 
     def run(self, action: Action, timeout: int = 600) -> ActionResult:
