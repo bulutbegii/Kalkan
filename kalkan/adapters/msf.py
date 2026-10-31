@@ -17,6 +17,8 @@ Guvenlik tasarimi:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,57 @@ class MetasploitAdapter(Adapter):
         self._rc: Path | None = None
         self._spool: Path | None = None
         self._rc_body = ""
+        self._runner_cache: str | None = None
+
+    def _runner(self) -> str:
+        """msfconsole nerede? Windows PATH -> 'native'; degilse WSL icinde
+        -> 'wsl'; hicbiri -> ''. Windows'ta Defender/MDM kurulumu engelledigi
+        icin WSL'e kurulan msf de calistirilabilsin diye."""
+        if self._runner_cache is not None:
+            return self._runner_cache
+        if shutil.which("msfconsole"):
+            self._runner_cache = "native"
+        elif shutil.which("wsl") and self._wsl_has_msf():
+            self._runner_cache = "wsl"
+        else:
+            self._runner_cache = ""
+        return self._runner_cache
+
+    @staticmethod
+    def _wsl_has_msf() -> bool:
+        try:
+            r = subprocess.run(
+                ["wsl", "-e", "sh", "-lc", "command -v msfconsole"],
+                capture_output=True, text=True, timeout=20,
+            )
+            return r.returncode == 0 and bool(r.stdout.strip())
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _to_wsl(self, winpath: Path | str) -> str:
+        """Windows yolunu WSL mount yoluna cevir (C:\\x -> /mnt/c/x)."""
+        try:
+            r = subprocess.run(
+                ["wsl", "-e", "wslpath", "-a", str(winpath)],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return str(winpath)
+
+    def available(self) -> bool:
+        return bool(self._runner())
+
+    def unavailable_reason(self) -> str:
+        if self._runner():
+            return ""
+        if shutil.which("wsl"):
+            return ("msfconsole ne Windows PATH'inde ne de WSL icinde bulundu; "
+                    "WSL'e kurun (./msfinstall)")
+        return ("msfconsole bulunamadi; Windows kurulumu Defender/MDM'e "
+                "takiliyorsa WSL2 kurup oraya yukleyin")
 
     @staticmethod
     def _mode_for(capability: str, args: dict) -> str:
@@ -92,13 +145,16 @@ class MetasploitAdapter(Adapter):
     def prepare(self, action: Action) -> None:
         self._dir = Path(tempfile.mkdtemp(prefix="kalkan-msf-"))
         self._spool = self._dir / "console.log"
-        self._rc_body = self._build_rc(action, spool=str(self._spool))
+        spool_arg = self._to_wsl(self._spool) if self._runner() == "wsl" else str(self._spool)
+        self._rc_body = self._build_rc(action, spool=spool_arg)
         self._rc = self._dir / "job.rc"
         self._rc.write_text(self._rc_body, encoding="utf-8")
 
     def command(self, action: Action) -> list[str]:
         if self._rc is None:
             raise RuntimeError("prepare() çağrılmadan command() kullanılamaz")
+        if self._runner() == "wsl":
+            return ["wsl", "-e", "msfconsole", "-q", "-n", "-r", self._to_wsl(self._rc)]
         return ["msfconsole", "-q", "-n", "-r", str(self._rc)]
 
     def cleanup(self) -> None:
@@ -113,7 +169,9 @@ class MetasploitAdapter(Adapter):
         body = self._build_rc(action, spool="<spool>")
         reason = self.unavailable_reason()
         head = f"[dry-run:{reason}] " if reason else "[dry-run] "
-        return head + "msfconsole -q -n -r <job.rc>\n" + body
+        launcher = ("wsl -e msfconsole -q -n -r <job.rc>" if self._runner() == "wsl"
+                    else "msfconsole -q -n -r <job.rc>")
+        return head + launcher + "\n" + body
 
     def run(self, action: Action, timeout: int = 600) -> ActionResult:
         result = super().run(action, timeout=timeout)
