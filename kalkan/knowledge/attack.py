@@ -41,6 +41,11 @@ class AttackKnowledge:
         self._stix_to_tid: dict[str, str] = {}
         self._mitigations: dict[str, dict[str, Any]] = {}
         self._tactics: dict[str, dict[str, Any]] = {}
+        self._groups: dict[str, dict[str, Any]] = {}
+        self._software: dict[str, dict[str, Any]] = {}
+        self._campaigns: dict[str, dict[str, Any]] = {}
+        self._data_sources: dict[str, dict[str, Any]] = {}
+        self._stix_to_ext: dict[str, tuple[str, str]] = {}
         self._loaded = False
 
     @property
@@ -129,6 +134,83 @@ class AttackKnowledge:
                         "url": self._external_url(obj),
                     }
 
+            elif kind == "intrusion-set":
+                if obj.get("revoked") or obj.get("x_mitre_deprecated"):
+                    continue
+                gid = self._external_id(obj)
+                if not gid:
+                    continue
+                name = obj.get("name", "")
+                self._groups[gid] = {
+                    "id": gid, "stix_id": obj.get("id", ""), "kind": "group",
+                    "name": name,
+                    "aliases": [a for a in obj.get("aliases", []) if a != name],
+                    "description": (obj.get("description") or "").strip(),
+                    "url": self._external_url(obj),
+                    "techniques": [], "software": [],
+                }
+                self._stix_to_ext[obj.get("id", "")] = ("group", gid)
+
+            elif kind in ("malware", "tool"):
+                if obj.get("revoked") or obj.get("x_mitre_deprecated"):
+                    continue
+                sid = self._external_id(obj)
+                if not sid:
+                    continue
+                name = obj.get("name", "")
+                self._software[sid] = {
+                    "id": sid, "stix_id": obj.get("id", ""), "kind": "software",
+                    "software_type": kind, "name": name,
+                    "aliases": [a for a in obj.get("x_mitre_aliases", []) if a != name],
+                    "platforms": obj.get("x_mitre_platforms", []),
+                    "description": (obj.get("description") or "").strip(),
+                    "url": self._external_url(obj),
+                    "techniques": [], "groups": [],
+                }
+                self._stix_to_ext[obj.get("id", "")] = ("software", sid)
+
+            elif kind == "campaign":
+                if obj.get("revoked") or obj.get("x_mitre_deprecated"):
+                    continue
+                cid = self._external_id(obj)
+                if not cid:
+                    continue
+                name = obj.get("name", "")
+                self._campaigns[cid] = {
+                    "id": cid, "stix_id": obj.get("id", ""), "kind": "campaign",
+                    "name": name,
+                    "aliases": [a for a in obj.get("aliases", []) if a != name],
+                    "description": (obj.get("description") or "").strip(),
+                    "first_seen": obj.get("first_seen", ""),
+                    "last_seen": obj.get("last_seen", ""),
+                    "url": self._external_url(obj),
+                    "techniques": [], "groups": [], "software": [],
+                }
+                self._stix_to_ext[obj.get("id", "")] = ("campaign", cid)
+
+            elif kind == "x-mitre-data-source":
+                dsid = self._external_id(obj)
+                if not dsid:
+                    continue
+                self._data_sources[dsid] = {
+                    "id": dsid, "stix_id": obj.get("id", ""), "kind": "data_source",
+                    "name": obj.get("name", ""),
+                    "platforms": obj.get("x_mitre_platforms", []),
+                    "description": (obj.get("description") or "").strip(),
+                    "url": self._external_url(obj),
+                    "components": [],
+                }
+                self._stix_to_ext[obj.get("id", "")] = ("data_source", dsid)
+
+        for obj in objects:
+            if obj.get("type") != "x-mitre-data-component":
+                continue
+            parent = self._stix_to_ext.get(obj.get("x_mitre_data_source_ref", ""))
+            if parent and parent[0] == "data_source":
+                ds = self._data_sources.get(parent[1])
+                if ds and obj.get("name"):
+                    ds["components"].append(obj.get("name", ""))
+
         for obj in objects:
             if obj.get("type") != "relationship":
                 continue
@@ -150,20 +232,57 @@ class AttackKnowledge:
                     self._index[parent]["sub_techniques"].append(child)
                 if child in self._index and parent:
                     self._index[child]["parent"] = parent
-            elif rel == "uses" and target in self._stix_to_tid:
-                tid = self._stix_to_tid[target]
-                src = self._objects.get(source, {})
-                if src.get("type") in ("intrusion-set", "malware", "tool", "campaign"):
-                    self._index[tid]["procedures"].append({
-                        "source": src.get("name", ""),
-                        "type": src.get("type", ""),
-                        "description": (obj.get("description") or "").strip(),
-                    })
+            elif rel == "uses":
+                src_ext = self._stix_to_ext.get(source)
+                if target in self._stix_to_tid:
+                    tid = self._stix_to_tid[target]
+                    src = self._objects.get(source, {})
+                    if src.get("type") in ("intrusion-set", "malware", "tool", "campaign"):
+                        self._index[tid]["procedures"].append({
+                            "source": src.get("name", ""),
+                            "type": src.get("type", ""),
+                            "description": (obj.get("description") or "").strip(),
+                        })
+                    if src_ext:
+                        ent = (self._groups.get(src_ext[1]) or self._software.get(src_ext[1])
+                               or self._campaigns.get(src_ext[1]))
+                        if ent is not None and tid not in ent["techniques"]:
+                            ent["techniques"].append(tid)
+                else:
+                    tgt_ext = self._stix_to_ext.get(target)
+                    if (src_ext and tgt_ext and tgt_ext[0] == "software"
+                            and src_ext[0] in ("group", "campaign")):
+                        ent = self._groups.get(src_ext[1]) or self._campaigns.get(src_ext[1])
+                        if ent is not None and tgt_ext[1] not in ent["software"]:
+                            ent["software"].append(tgt_ext[1])
+                        soft = self._software.get(tgt_ext[1])
+                        if soft is not None and src_ext[1] not in soft["groups"]:
+                            soft["groups"].append(src_ext[1])
+            elif rel == "attributed-to":
+                src_ext = self._stix_to_ext.get(source)
+                tgt_ext = self._stix_to_ext.get(target)
+                if (src_ext and tgt_ext and src_ext[0] == "campaign"
+                        and tgt_ext[0] == "group"):
+                    camp = self._campaigns.get(src_ext[1])
+                    if camp is not None and tgt_ext[1] not in camp["groups"]:
+                        camp["groups"].append(tgt_ext[1])
 
         for info in self._index.values():
             info["mitigations"].sort(key=lambda m: m["name"])
             info["sub_techniques"].sort()
             info["procedures"].sort(key=lambda p: p["source"])
+        for grp in self._groups.values():
+            grp["techniques"].sort()
+            grp["software"].sort()
+        for soft in self._software.values():
+            soft["techniques"].sort()
+            soft["groups"].sort()
+        for camp in self._campaigns.values():
+            camp["techniques"].sort()
+            camp["groups"].sort()
+            camp["software"].sort()
+        for ds in self._data_sources.values():
+            ds["components"].sort()
         self._loaded = True
         return self
 
@@ -249,7 +368,83 @@ class AttackKnowledge:
             "sub_techniques": sub,
             "mitigations": len(self._mitigations),
             "procedures": procs,
+            "groups": len(self._groups),
+            "software": len(self._software),
+            "campaigns": len(self._campaigns),
+            "data_sources": len(self._data_sources),
         }
+
+    def groups(self) -> list[dict[str, Any]]:
+        self.load()
+        return sorted(self._groups.values(), key=lambda g: g["id"])
+
+    def software_catalog(self) -> list[dict[str, Any]]:
+        self.load()
+        return sorted(self._software.values(), key=lambda s: s["id"])
+
+    def campaigns(self) -> list[dict[str, Any]]:
+        self.load()
+        return sorted(self._campaigns.values(), key=lambda c: c["id"])
+
+    def data_sources(self) -> list[dict[str, Any]]:
+        self.load()
+        return sorted(self._data_sources.values(), key=lambda d: d["id"])
+
+    def group(self, gid: str) -> dict[str, Any] | None:
+        self.load()
+        return self._groups.get(gid.strip().upper())
+
+    def software(self, sid: str) -> dict[str, Any] | None:
+        self.load()
+        return self._software.get(sid.strip().upper())
+
+    def campaign(self, cid: str) -> dict[str, Any] | None:
+        self.load()
+        return self._campaigns.get(cid.strip().upper())
+
+    def data_source(self, dsid: str) -> dict[str, Any] | None:
+        self.load()
+        return self._data_sources.get(dsid.strip().upper())
+
+    def lookup(self, obj_id: str) -> dict[str, Any] | None:
+        """Herhangi bir ATT&CK kimligini cozumle: T/G/S/C/DS one ekine gore."""
+        self.load()
+        key = obj_id.strip().upper()
+        if key.startswith("DS"):
+            return self.data_source(key)
+        if key.startswith("G"):
+            return self.group(key)
+        if key.startswith("S"):
+            return self.software(key)
+        if key.startswith("C") and key[1:].isdigit():
+            return self.campaign(key)
+        return self.technique(key)
+
+    def search_all(self, query: str, limit: int = 30) -> list[dict[str, Any]]:
+        """Teknik + grup + yazilim + kampanya genelinde ara (kind etiketli).
+
+        Isim/takma-ad eslesmeleri once gelir (orn. 'lazarus' -> G0032 grubu),
+        sonra aciklama eslesmeleri. Adlandirilmis varliklar (grup/yazilim/
+        kampanya) teknik aciklama eslesmelerinin ustunde durur."""
+        self.load()
+        q = query.strip().lower()
+        if not q:
+            return []
+        pools = (
+            self._groups.values(), self._software.values(), self._campaigns.values(),
+            [dict(i, kind="technique") for i in self._index.values()],
+        )
+        name_hits: list[dict[str, Any]] = []
+        desc_hits: list[dict[str, Any]] = []
+        for pool in pools:
+            for info in pool:
+                name = info.get("name", "").lower()
+                aliases = " ".join(info.get("aliases", [])).lower()
+                if q in name or q in aliases:
+                    name_hits.append(info)
+                elif q in info.get("description", "").lower():
+                    desc_hits.append(info)
+        return (name_hits + desc_hits)[:limit]
 
     def all(self) -> list[dict[str, Any]]:
         self.load()

@@ -411,6 +411,39 @@ def cmd_navigator(args) -> int:
     return 0
 
 
+def _print_entity(info: dict) -> int:
+    """Grup / yazilim / kampanya / veri kaynagi kaydini tum detayiyla bas."""
+    kind = info.get("kind")
+    label = {"group": "GRUP", "software": "YAZILIM", "campaign": "KAMPANYA",
+             "data_source": "VERİ KAYNAĞI"}.get(kind, str(kind))
+    print(f"{info['id']}  {info['name']}  [{label}]")
+    if info.get("aliases"):
+        print(f"takma adlar : {', '.join(info['aliases'])}")
+    if info.get("software_type"):
+        print(f"tür         : {info['software_type']}")
+    if info.get("platforms"):
+        print(f"platformlar : {', '.join(info['platforms'])}")
+    if info.get("first_seen") or info.get("last_seen"):
+        print(f"görülme     : {info.get('first_seen', '?')} → {info.get('last_seen', '?')}")
+    print(f"url         : {info.get('url', '')}")
+    if info.get("description"):
+        print(f"\naçıklama (ne/nasıl):\n{info['description'][:1600].strip()}")
+    techs = info.get("techniques") or []
+    if techs:
+        print(f"\nkullandığı teknikler ({len(techs)}): {', '.join(techs[:40])}"
+              + (" ..." if len(techs) > 40 else ""))
+    soft = info.get("software") or []
+    if soft:
+        print(f"kullandığı yazılım ({len(soft)}): {', '.join(soft[:30])}")
+    groups = info.get("groups") or []
+    if groups:
+        print(f"ilişkili gruplar ({len(groups)}): {', '.join(groups[:30])}")
+    comps = info.get("components") or []
+    if comps:
+        print(f"veri bileşenleri ({len(comps)}): {', '.join(comps)}")
+    return 0
+
+
 def cmd_knowledge(args) -> int:
     query = args.search_query if args.search_query else args.query
 
@@ -428,27 +461,61 @@ def cmd_knowledge(args) -> int:
 
     knowledge = AttackKnowledge(domain=domain, cache_dir=cache_root)
 
-    if args.action == "fetch":
-        path = knowledge.fetch(force=args.force)
-        print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
-        st = knowledge.statistics()
+    def _print_stats(st: dict) -> None:
         print(f"içerik    : {st['techniques']} teknik (+{st['sub_techniques']} alt teknik), "
               f"{st['tactics']} taktik, {st['mitigations']} mitigasyon, "
               f"{st['procedures']} prosedür örneği")
+        print(f"            {st['groups']} grup (G), {st['software']} yazılım (S), "
+              f"{st['campaigns']} kampanya (C), {st['data_sources']} veri kaynağı (DS)")
+
+    if args.action == "fetch":
+        path = knowledge.fetch(force=args.force)
+        print(f"indirildi: {path} ({path.stat().st_size / 1e6:.1f} MB)")
+        _print_stats(knowledge.statistics())
+        return 0
+
+    if args.action == "stats":
+        _print_stats(knowledge.statistics())
+        return 0
+
+    if args.action in ("groups", "software", "campaigns", "datasources"):
+        rows = {
+            "groups": knowledge.groups, "software": knowledge.software_catalog,
+            "campaigns": knowledge.campaigns, "datasources": knowledge.data_sources,
+        }[args.action]()
+        if query:
+            q = query.lower()
+            rows = [r for r in rows
+                    if q in r["name"].lower()
+                    or any(q in a.lower() for a in r.get("aliases", []))]
+        for r in rows:
+            extra = ""
+            if r.get("kind") in ("group", "software", "campaign"):
+                extra = f"  [{len(r.get('techniques', []))} teknik]"
+            alias = f"  ({', '.join(r['aliases'][:3])})" if r.get("aliases") else ""
+            print(f"{r['id']:<8} {r['name']}{alias}{extra}")
+        print(f"\ntoplam: {len(rows)}  —  detay için: knowledge show --technique <ID>")
         return 0
 
     if args.action == "search":
         if not query:
             print("sorgu bos: knowledge search \"kelime\"", file=sys.stderr)
             return 2
-        hits = knowledge.search(query)
+        hits = knowledge.search_all(query)
         if not hits:
             print("sonuc yok", file=sys.stderr)
         for info in hits:
-            print(f"{info['id']:<10} {info['name']}  ({', '.join(info['tactics'])})")
+            kind = info.get("kind", "technique")
+            tag = {"technique": "T", "group": "GRUP", "software": "YZLM",
+                   "campaign": "KMPY"}.get(kind, kind)
+            ctx = (", ".join(info.get("tactics", [])) if kind == "technique"
+                   else ", ".join(info.get("aliases", [])[:3]))
+            print(f"[{tag:<4}] {info['id']:<10} {info['name']}" + (f"  ({ctx})" if ctx else ""))
         return 0
 
-    info = knowledge.technique(args.technique)
+    info = knowledge.lookup(args.technique or query)
+    if info and info.get("kind") in ("group", "software", "campaign", "data_source"):
+        return _print_entity(info)
     if not info:
         print(f"teknik bulunamadı: {args.technique}", file=sys.stderr)
         return 2
@@ -1624,8 +1691,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cov.add_argument("--json", action="store_true")
     p_cov.set_defaults(func=cmd_coverage)
 
-    p_know = sub.add_parser("knowledge", help="ATT&CK/ATLAS bilgi tabanı")
-    p_know.add_argument("action", choices=["fetch", "search", "show", "atlas"])
+    p_know = sub.add_parser("knowledge", help="ATT&CK/ATLAS bilgi tabanı (tam veri seti)")
+    p_know.add_argument("action", choices=[
+        "fetch", "search", "show", "atlas", "stats",
+        "groups", "software", "campaigns", "datasources",
+    ])
     p_know.add_argument("query", nargs="?", default="")
     p_know.add_argument(
         "--query", "-q",

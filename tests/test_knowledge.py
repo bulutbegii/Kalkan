@@ -240,5 +240,121 @@ class TestAttackKnowledge(unittest.TestCase):
             knowledge.technique("T9000")
 
 
+_GROUP = {
+    "type": "intrusion-set", "id": "intrusion-set--b0b00000-0000-0000-0000-000000000001",
+    "name": "Synthetic Bear", "aliases": ["Synthetic Bear", "SynthAPT"],
+    "description": "Sentetik tehdit grubu.",
+    "external_references": [{"source_name": "mitre-attack", "external_id": "G9000",
+                             "url": "https://attack.mitre.org/groups/G9000"}],
+}
+_SOFTWARE = {
+    "type": "malware", "id": "malware--50f70000-0000-0000-0000-000000000002",
+    "name": "SynthRAT", "x_mitre_aliases": ["SynthRAT"],
+    "description": "Sentetik zararli.", "x_mitre_platforms": ["Windows"],
+    "external_references": [{"source_name": "mitre-attack", "external_id": "S9000",
+                             "url": "https://attack.mitre.org/software/S9000"}],
+}
+_CAMPAIGN = {
+    "type": "campaign", "id": "campaign--ca000000-0000-0000-0000-000000000003",
+    "name": "Synthetic Op", "aliases": ["Synthetic Op"],
+    "description": "Sentetik kampanya.",
+    "first_seen": "2024-01-01T00:00:00Z", "last_seen": "2024-06-01T00:00:00Z",
+    "external_references": [{"source_name": "mitre-attack", "external_id": "C9000",
+                             "url": "https://attack.mitre.org/campaigns/C9000"}],
+}
+_DATA_SOURCE = {
+    "type": "x-mitre-data-source", "id": "x-mitre-data-source--d5000000-0000-0000-0000-000000000004",
+    "name": "Synthetic Logs", "x_mitre_platforms": ["Windows"],
+    "description": "Sentetik veri kaynagi.",
+    "external_references": [{"source_name": "mitre-attack", "external_id": "DS9000",
+                             "url": "https://attack.mitre.org/datasources/DS9000"}],
+}
+_DATA_COMPONENT = {
+    "type": "x-mitre-data-component", "id": "x-mitre-data-component--dc000000-0000-0000-0000-000000000005",
+    "name": "Synthetic Log Creation",
+    "x_mitre_data_source_ref": _DATA_SOURCE["id"],
+}
+_REL_GROUP_USES_TECH = {
+    "type": "relationship", "id": "relationship--aa000000-0000-0000-0000-000000000006",
+    "relationship_type": "uses", "source_ref": _GROUP["id"],
+    "target_ref": ATTACK_ENTERPRISE_PATTERN["id"],
+}
+_REL_GROUP_USES_SW = {
+    "type": "relationship", "id": "relationship--aa000000-0000-0000-0000-000000000007",
+    "relationship_type": "uses", "source_ref": _GROUP["id"], "target_ref": _SOFTWARE["id"],
+}
+_REL_CAMP_ATTR = {
+    "type": "relationship", "id": "relationship--aa000000-0000-0000-0000-000000000008",
+    "relationship_type": "attributed-to", "source_ref": _CAMPAIGN["id"], "target_ref": _GROUP["id"],
+}
+_REL_CAMP_USES_TECH = {
+    "type": "relationship", "id": "relationship--aa000000-0000-0000-0000-000000000009",
+    "relationship_type": "uses", "source_ref": _CAMPAIGN["id"],
+    "target_ref": ATTACK_ENTERPRISE_PATTERN["id"],
+}
+_REL_SW_USES_TECH = {
+    "type": "relationship", "id": "relationship--aa000000-0000-0000-0000-00000000000a",
+    "relationship_type": "uses", "source_ref": _SOFTWARE["id"],
+    "target_ref": ATTACK_ENTERPRISE_PATTERN["id"],
+}
+
+
+class TestAttackFullDataset(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.cache = Path(self.tmp.name)
+        bundle = _bundle([
+            ATTACK_ENTERPRISE_PATTERN, _GROUP, _SOFTWARE, _CAMPAIGN,
+            _DATA_SOURCE, _DATA_COMPONENT, _REL_GROUP_USES_TECH, _REL_GROUP_USES_SW,
+            _REL_CAMP_ATTR, _REL_CAMP_USES_TECH, _REL_SW_USES_TECH,
+        ])
+        (self.cache / "enterprise-attack.json").write_text(
+            json.dumps(bundle, ensure_ascii=False), encoding="utf-8")
+        self.k = AttackKnowledge(domain="enterprise", cache_dir=self.cache).load()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_statistics_counts_all_kinds(self) -> None:
+        st = self.k.statistics()
+        self.assertEqual(st["groups"], 1)
+        self.assertEqual(st["software"], 1)
+        self.assertEqual(st["campaigns"], 1)
+        self.assertEqual(st["data_sources"], 1)
+
+    def test_group_links(self) -> None:
+        g = self.k.group("G9000")
+        self.assertIsNotNone(g)
+        self.assertIn("T9000", g["techniques"])
+        self.assertIn("S9000", g["software"])
+        self.assertIn("SynthAPT", g["aliases"])
+
+    def test_software_links(self) -> None:
+        s = self.k.software("S9000")
+        self.assertIn("G9000", s["groups"])
+        self.assertIn("T9000", s["techniques"])
+
+    def test_campaign_links(self) -> None:
+        c = self.k.campaign("C9000")
+        self.assertIn("G9000", c["groups"])
+        self.assertIn("T9000", c["techniques"])
+
+    def test_data_source_components(self) -> None:
+        ds = self.k.data_source("DS9000")
+        self.assertIn("Synthetic Log Creation", ds["components"])
+
+    def test_lookup_routes_by_prefix(self) -> None:
+        self.assertEqual(self.k.lookup("G9000")["kind"], "group")
+        self.assertEqual(self.k.lookup("S9000")["kind"], "software")
+        self.assertEqual(self.k.lookup("C9000")["kind"], "campaign")
+        self.assertEqual(self.k.lookup("DS9000")["kind"], "data_source")
+        self.assertEqual(self.k.lookup("T9000")["id"], "T9000")
+
+    def test_search_all_name_first(self) -> None:
+        hits = self.k.search_all("Synthetic Bear")
+        self.assertTrue(hits)
+        self.assertEqual(hits[0]["id"], "G9000")
+
+
 if __name__ == "__main__":
     unittest.main()
