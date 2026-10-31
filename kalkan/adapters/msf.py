@@ -18,11 +18,14 @@ Guvenlik tasarimi:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 _WSL_ENV = {**os.environ, "WSL_UTF8": "1"}
 
@@ -134,6 +137,7 @@ class MetasploitAdapter(Adapter):
         lines: list[str] = []
         if spool:
             lines.append(f"spool {spool}")
+        lines.append("color false")
         lines += [f"use {module}"]
         lines.append("info")
         lines += [f"set RHOSTS {action.target}"]
@@ -212,7 +216,8 @@ class MetasploitAdapter(Adapter):
         return result
 
     def parse(self, stdout: str, action: Action) -> dict[str, Any]:
-        text = (stdout or "").lower()
+        stdout = _ANSI_RE.sub("", stdout or "")
+        text = stdout.lower()
         mode = self._mode_for(action.capability, action.args)
         vulnerable = any(
             m in text
