@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import __version__
+from . import __version__, ui
 from .adapters import load_default_registry
 from .audit import AuditLog
 from .knowledge import atlas, mapping
@@ -84,17 +84,39 @@ def _print_plan(p: Plan, as_json: bool) -> None:
             )
         )
         return
-    print(f"\nhedef     : {p.target}")
-    print(f"amaç      : {p.objective}")
-    print(f"aksiyon   : {len(p.actions)}  (tavan risk: {p.max_risk().label})")
+    print(f"\n{ui.grey('hedef')}     : {ui.bold(p.target)}")
+    print(f"{ui.grey('amaç')}      : {p.objective}")
+    print(f"{ui.grey('aksiyon')}   : {len(p.actions)}  "
+          f"({ui.grey('tavan risk:')} {ui.risk(p.max_risk().label)})")
     for i, a in enumerate(p.actions, 1):
-        print(f"  {i}. [{a.risk.label:9}] {a.tool}.{a.capability:<18} {a.technique}")
+        lbl = a.risk.label
+        pad = " " * max(0, 9 - len(lbl))
+        name = f"{a.tool}.{a.capability}"
+        npad = " " * max(0, 20 - len(name))
+        print(f"  {ui.dim(f'{i:2}.')} [{ui.risk(lbl)}]{pad} {ui.bold(name)}{npad} {ui.cyan(a.technique)}")
         if a.rationale:
-            print(f"       - {a.rationale}")
+            print(ui.dim(f"       - {a.rationale}"))
         if a.args:
-            print(f"       - {json.dumps(a.args, ensure_ascii=False)}")
+            print(ui.dim(f"       - {json.dumps(a.args, ensure_ascii=False)}"))
     for note in p.notes:
-        print(f"  not: {note}")
+        print(f"  {ui.grey('not:')} {ui.grey(note)}")
+
+
+def _progress_event(evt: str, idx: int, total: int, action: Action, result) -> None:
+    """Executor canli ilerleme olayini renkli satira cevirir (CLI geri cagrisi)."""
+    tag = ui.dim(f"[{idx}/{total}]")
+    name = f"{action.tool}.{action.capability}"
+    if evt == "start":
+        print(f"  {tag} {ui.cyan(ui.SYM['run'])} {ui.bold(name)}  {ui.risk(action.risk.label)}")
+        return
+    sym = ui.status_symbol(result.status)
+    extra = f"  {ui.dim(result.detail)}" if (result.detail and result.status != "dry-run") else ""
+    print(f"       {sym} {ui.status(result.status)}{extra}")
+    if result.status == "dry-run" and result.detail:
+        print(ui.dim(f"       {result.detail}"))
+    if result.parsed:
+        prev = json.dumps(result.parsed, ensure_ascii=False)
+        print(ui.dim(f"       {prev[:300]}{'...' if len(prev) > 300 else ''}"))
 
 
 def _augment_from_feed(args, intent: Intent) -> Intent:
@@ -262,14 +284,17 @@ def cmd_tools(args) -> int:
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return 0
-    print(f"{'ARAÇ':<10} {'DURUM':<12} {'RİSK':<9} YETENEKLER")
+    print(ui.grey(f"{'ARAÇ':<10} {'DURUM':<8} {'RİSK':<9} YETENEKLER"))
     for row in rows:
-        state = "hazır" if row["available"] else "eksik"
-        print(
-            f"{row['tool']:<10} {state:<12} {row['risk']:<9} {', '.join(row['capabilities'])}"
-        )
+        ok = row["available"]
+        st = "hazır" if ok else "eksik"
+        st_c = (ui.green if ok else ui.grey)(st) + " " * max(0, 8 - len(st))
+        rlbl = row["risk"]
+        r_c = ui.risk(rlbl) + " " * max(0, 9 - len(rlbl))
+        tool = row["tool"]
+        print(f"{ui.bold(tool)}{' ' * max(0, 10 - len(tool))} {st_c} {r_c} {', '.join(row['capabilities'])}")
         if row["reason"]:
-            print(f"{'':<10} - {row['reason']}")
+            print(ui.grey(f"{'':<10} - {row['reason']}"))
     return 0
 
 
@@ -279,15 +304,15 @@ def cmd_coverage(args) -> int:
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return 0
-    print(f"{'TEKNİK':<12} {'FRAMEWORK':<10} {'TAKTİK':<18} {'ADIM':<5} {'DURUM'}")
+    print(ui.grey(f"{'TEKNİK':<12} {'FRAMEWORK':<10} {'TAKTİK':<18} {'ADIM':<5} DURUM"))
     for row in rows:
-        state = "hazır" if row["ready"] else "eksik"
+        st = ui.green("hazır") if row["ready"] else ui.grey("eksik")
         print(
             f"{row['technique']:<12} {row['framework']:<10} {row['tactic']:<18} "
-            f"{row['steps']:<5} {state}"
+            f"{row['steps']:<5} {st}"
         )
         for missing in row["missing"]:
-            print(f"{'':<12} - {missing}")
+            print(ui.grey(f"{'':<12} - {missing}"))
     auto = atlas.automated()
     manual = atlas.manual()
     print(f"\nATLAS: {len(auto)} teknik otomatik test edilebilir, {len(manual)} manuel.")
@@ -469,26 +494,16 @@ def cmd_run(args) -> int:
             dry_run=args.dry_run,
             timeout=args.timeout,
         )
+        print()
         try:
-            results = executor.run(plan)
+            results = executor.run(plan, on_event=_progress_event)
         except ScopeViolation as exc:
-            print(f"\nKAPSAM İHLALİ - plan durduruldu: {exc}", file=sys.stderr)
+            print(f"\n{ui.red('KAPSAM İHLALİ')} - plan durduruldu: {exc}", file=sys.stderr)
             return 2
         except PolicyDenied as exc:
-            print(f"\nPOLİTİKA REDDİ - plan durduruldu: {exc}", file=sys.stderr)
+            print(f"\n{ui.red('POLİTİKA REDDİ')} - plan durduruldu: {exc}", file=sys.stderr)
             return 2
-
-        print()
-        for result in results:
-            print(f"  {result.summary()}")
-            if result.status == "dry-run":
-                print(f"    {result.detail}")
-            elif result.detail:
-                print(f"    - {result.detail}")
-            if result.parsed:
-                preview = json.dumps(result.parsed, ensure_ascii=False)
-                print(f"    - {preview[:600]}{'...' if len(preview) > 600 else ''}")
-        print(f"\n  denetim kaydı: {args.audit}")
+        print(f"\n  {ui.grey('denetim kaydı:')} {args.audit}")
         if not getattr(args, "no_report", False) and not args.dry_run:
             from . import report
             try:
@@ -542,9 +557,9 @@ def cmd_chat(args) -> int:
 
     def approver(action: Action) -> bool:
         if state["auto"]:
-            print(f"    [auto] onaylandi: {action.describe()}")
+            print(ui.dim(f"    {ui.SYM['ok']} [auto] onaylandı: {action.describe()}"))
             return True
-        print(f"\n  ! onay gerekiyor: {action.describe()}")
+        print(f"\n  {ui.yellow(ui.SYM['warn'] + ' onay gerekiyor')}: {action.describe()}")
         if action.technique:
             print(f"    teknik : {action.technique}")
         if action.args:
@@ -591,24 +606,15 @@ def cmd_chat(args) -> int:
         _print_plan(plan, False)
         if not plan.actions:
             return
+        print()
         try:
-            results = executor.run(plan)
+            results = executor.run(plan, on_event=_progress_event)
         except ScopeViolation as exc:
-            print(f"  KAPSAM İHLALİ: {exc}", file=sys.stderr)
+            print(f"  {ui.red('KAPSAM İHLALİ')}: {exc}", file=sys.stderr)
             return
         except PolicyDenied as exc:
-            print(f"  POLİTİKA REDDİ: {exc}", file=sys.stderr)
+            print(f"  {ui.red('POLİTİKA REDDİ')}: {exc}", file=sys.stderr)
             return
-        print()
-        for r in results:
-            print(f"  {r.summary()}")
-            if r.status == "dry-run":
-                print(f"    {r.detail}")
-            elif r.detail:
-                print(f"    - {r.detail}")
-            if r.parsed:
-                prev = json.dumps(r.parsed, ensure_ascii=False)
-                print(f"    - {prev[:400]}{'...' if len(prev) > 400 else ''}")
         ozet = ""
         if state["summary"] and online:
             print("\n  ... özet hazırlanıyor")
@@ -627,7 +633,8 @@ def cmd_chat(args) -> int:
         shim = _chat_shim(base, text)
         if extra_args:
             shim.arg = list(extra_args)
-        print(f"  ... model düşünüyor ({model_name})" if online else "  ... kural tabanlı eşleştirme")
+        print(ui.dim(f"  ... model düşünüyor ({model_name})") if online
+              else ui.dim("  ... kural tabanlı eşleştirme"))
         intent = router.route(text)
         used_session_target = not intent.targets and bool(state["target"])
         targets = intent.targets or ((state["target"],) if state["target"] else ())
@@ -651,17 +658,22 @@ def cmd_chat(args) -> int:
         plans = _build_plans(shim, intent)
         return plans[0] if plans else None
 
-    print("Kalkan sohbet — çıkış: /quit, yardım: /help")
-    print(f"  model   : {model_name} ({'çevrimiçi' if online else 'çevrimdışı → kural tabanlı yedek'})")
-    print(f"  hedef   : {state['target'] or '(ayarlı değil — /target ile belirle)'}")
-    print(f"  risk    : passive/active otomatik · intrusive/destructive ONAYLI"
-          f"{' · dry-run' if args.dry_run else ''}")
-    print(f"  özet    : {'açık' if state['summary'] and online else 'kapalı'}")
-    print(f"  kapsam  : {args.scope}   denetim: {args.audit}")
+    print()
+    print(ui.rule())
+    print(ui.banner(__version__, model_name, online, Path(args.scope).exists()))
+    print(ui.rule())
+    print(f"  {ui.grey('çıkış')} /quit    {ui.grey('yardım')} /help    "
+          f"{ui.grey('silahla')} /arm · /arg")
+    print(f"  {ui.grey('hedef')} : {ui.bold(state['target']) if state['target'] else ui.grey('(ayarlı değil — /target ile belirle)')}")
+    onay = (ui.yellow('OTOMATIK — intrusive sormadan çalışır (/auto off ile kapat)')
+            if state['auto'] else 'intrusive/destructive ONAY ister')
+    print(f"  {ui.grey('onay')}  : {onay}{ui.dim(' · dry-run') if args.dry_run else ''}")
+    print(f"  {ui.grey('özet')}  : {ui.green('açık') if state['summary'] and online else ui.grey('kapalı')}")
+    print(f"  {ui.grey('kapsam')}: {args.scope}   {ui.grey('denetim')}: {args.audit}")
 
     while True:
         try:
-            line = input(f"\nkalkan({state['target'] or '-'})> ").strip()
+            line = input(f"\n{ui.cyan('kalkan')}({ui.bold(state['target'] or '-')})> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\ngörüşürüz.")
             return 0
@@ -836,12 +848,10 @@ def cmd_home(args) -> int:
     scope_ok = Path(base["scope"]).exists()
 
     def banner():
-        print("\n" + "═" * 56)
-        print("  ██ KALKAN ██   yetkili güvenlik orkestrasyon çekirdeği")
-        print(f"  v{__version__}   model: {base['model']} "
-              f"[{'çevrimiçi' if online else 'çevrimdışı'}]   "
-              f"kapsam: {'var' if scope_ok else 'YOK'}")
-        print("═" * 56)
+        print()
+        print(ui.rule())
+        print(ui.banner(__version__, base["model"], online, scope_ok))
+        print(ui.rule())
 
     MENU = [
         ("1", "Sohbet (chat)", "Modelle konuşarak planla/çalıştır — ana kullanım"),
@@ -859,7 +869,7 @@ def cmd_home(args) -> int:
     def show_menu():
         print()
         for key, title, desc in MENU:
-            print(f"  [{key}] {title:<20} {desc}")
+            print(f"  [{ui.cyan(key)}] {ui.bold(title)}{' ' * max(0, 20 - len(title))} {ui.grey(desc)}")
 
     banner()
     if not scope_ok:

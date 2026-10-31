@@ -76,8 +76,17 @@ class Executor:
             rationale=action.rationale,
         )
 
-    def run(self, plan: Plan) -> list[ActionResult]:
+    def run(
+        self,
+        plan: Plan,
+        on_event: Callable[[str, int, int, Action, "ActionResult | None"], None] | None = None,
+    ) -> list[ActionResult]:
+        """Plani uygular. `on_event` verilirse her adim icin canli ilerleme
+        bildirir: ("start", idx, total, action, None) ve
+        ("done", idx, total, action, result). CLI bunu gorsel ilerleme
+        cubuguna cevirir; verilmezse davranis aynidir (test/CI)."""
         results: list[ActionResult] = []
+        total = len(plan.actions)
         self.audit.append(
             "plan.start",
             objective=plan.objective,
@@ -86,13 +95,17 @@ class Executor:
             dry_run=self.dry_run,
         )
 
-        for action in plan.actions:
+        for idx, action in enumerate(plan.actions, 1):
+            if on_event:
+                on_event("start", idx, total, action, None)
             try:
                 action = self._materialize(action)
             except UnresolvedArgument as exc:
                 denied = ActionResult(action=action, status="denied", detail=str(exc))
                 results.append(denied)
                 self.audit.append("action.denied", action=action.key(), reason=str(exc))
+                if on_event:
+                    on_event("done", idx, total, action, denied)
                 continue
 
             try:
@@ -132,6 +145,8 @@ class Executor:
             )
             results.append(result)
             self._absorb(result)
+            if on_event:
+                on_event("done", idx, total, action, result)
 
         self.audit.append("plan.finish", results=len(results), target=plan.target)
         return results
