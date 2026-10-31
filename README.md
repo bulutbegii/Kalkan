@@ -515,14 +515,3 @@ playbook tutarlılığı), executor (scope ihlali, onay reddi, destructive bloğ
 
 ---
 
-## 12. Yol haritası
-
-- [x] `ffuf`, `httpx`, `dalfox`, `sqlmap`, `wafw00f`, `arjun`, `nikto`, `webprobe` adaptörleri
-- [x] Canlı CVE/CVSS/KEV/EPSS beslemesi + CWE→ATT&CK köprüsü (`feeds/`, `bridge.py`)
-- [x] Sohbet (REPL) + menü arayüzü + masaüstü başlatıcı + Türkçe özet
-- [x] Tarama sonrası otomatik Markdown rapor (`report.py`)
-- [ ] nikto Windows checkout sorunu (symlink/`ö`-profil) kalıcı çözümü
-- [ ] Playbook'ları YAML'dan yükleme (kod değiştirmeden genişletme)
-- [ ] Sonuçları STIX 2.1 bundle olarak dışa aktarma (MISP/OpenCTI)
-- [ ] `audit` kaydını GPG/HSM ile imzalama
-- [ ] Çoklu hedef için paralel yürütme (şu an sıralı)
