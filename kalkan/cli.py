@@ -130,6 +130,20 @@ def _augment_from_feed(args, intent: Intent) -> Intent:
     if cve_ids:
         setattr(args, "feed_cve_id", ",".join(dict.fromkeys(cve_ids)))
         cve_notes.append(f"besleme: nuclei -id -> {', '.join(dict.fromkeys(cve_ids))}")
+
+    msf = suggest.msf_candidates(sugg)
+    if msf:
+        if not getattr(args, "module", None):
+            setattr(args, "feed_module", msf[0].msf_module)
+        allc = ", ".join(f"{s.cve}->{s.msf_module}" for s in msf)
+        cve_notes.append(f"besleme: MSF modul adaylari (check) -> {allc}")
+        cve_notes.append(f"besleme: kullan: --arg mode=run yalnizca --allow-destructive ile")
+
+    sqli = suggest.sqli_candidates(sugg)
+    if sqli:
+        ids = ", ".join(s.cve for s in sqli)
+        cve_notes.append(f"besleme: SQLi sinifi CVE ({ids}); sqlmap icin --arg verify=1 ekle")
+
     return Intent(
         objective=intent.objective,
         targets=intent.targets,
@@ -177,13 +191,21 @@ def _build_plans(args, intent: Intent) -> list[Plan]:
     max_risk = Risk.parse(args.max_risk) if getattr(args, "max_risk", None) else Risk.INTRUSIVE
 
     overrides: dict[str, Any] = {}
+    feed_cve = getattr(args, "feed_cve_id", None)
+    if feed_cve:
+        overrides["cve_id"] = feed_cve
+    feed_module = getattr(args, "feed_module", None)
+    if feed_module:
+        overrides["module"] = feed_module
     for key in ("module", "payload", "mode", "endpoint", "model"):
         value = getattr(args, key, None)
         if value:
             overrides[key] = value
-    feed_cve = getattr(args, "feed_cve_id", None)
-    if feed_cve:
-        overrides["cve_id"] = feed_cve
+    for raw in getattr(args, "arg", None) or []:
+        if "=" not in raw:
+            raise SystemExit(f"gecersiz --arg (key=value bekleniyor): {raw!r}")
+        key, value = raw.split("=", 1)
+        overrides[key.strip()] = value.strip()
 
     return plan_for_intent(intent, registry, max_risk, overrides)
 
@@ -870,6 +892,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="canli CVE beslemesinden eslesen playbook tekniklerini plana ekle")
         p.add_argument("--feed-min-score", type=float, default=40.0,
                        help="--from-feed: minimum CVE oncelik skoru (varsayilan 40)")
+        p.add_argument("--arg", action="append", default=[], metavar="KEY=VALUE",
+                       help="adim argumani override'i (tekrarlanabilir); orn. --arg verify=1 "
+                            "sqlmap/dalfox'u acar, --arg module=exploit/... msf'i acar")
         p.add_argument("--tactic", default=None)
         p.add_argument("--target", default=None)
         p.add_argument("--max-risk", default="intrusive", choices=["passive", "active", "intrusive", "destructive"])

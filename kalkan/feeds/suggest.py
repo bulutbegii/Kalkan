@@ -27,6 +27,8 @@ class Suggestion:
     kev: bool
     techniques: list[str] = field(default_factory=list)
     rationale: str = ""
+    msf_module: str = ""
+    sqli: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -36,6 +38,8 @@ class Suggestion:
             "kev": self.kev,
             "techniques": self.techniques,
             "rationale": self.rationale,
+            "msf_module": self.msf_module,
+            "sqli": self.sqli,
         }
 
 
@@ -87,6 +91,8 @@ def suggest_for_text(
                 kev=record.kev,
                 techniques=link["runnable"],
                 rationale=f"'{needle}' ile eslesti" + (" · KEV" if record.kev else ""),
+                msf_module=link.get("msf_module", ""),
+                sqli=link.get("sqli", False),
             ))
 
     scored.sort(key=lambda s: (s.kev, s.priority), reverse=True)
@@ -101,3 +107,15 @@ def techniques_from_suggestions(suggestions: list[Suggestion]) -> list[str]:
             if tid not in out:
                 out.append(tid)
     return out
+
+
+def msf_candidates(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """MSF modulu olan onerileri oncelik sirasina gore dondur (en yuksek once)."""
+    cands = [s for s in suggestions if s.msf_module]
+    cands.sort(key=lambda s: (s.kev, s.priority), reverse=True)
+    return cands
+
+
+def sqli_candidates(suggestions: list[Suggestion]) -> list[Suggestion]:
+    """SQLi sinifindaki onerileri dondur (sqlmap adimi icin)."""
+    return [s for s in suggestions if s.sqli]

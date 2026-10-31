@@ -90,6 +90,42 @@ ATLAS_KEYWORDS: tuple[tuple[tuple[str, ...], str, float, str], ...] = (
 )
 
 
+CVE_TO_MSF: dict[str, tuple[str, str]] = {
+    "CVE-2017-0144": ("exploit/windows/smb/ms17_010_eternalblue", "EternalBlue (MS17-010)"),
+    "CVE-2017-0143": ("exploit/windows/smb/ms17_010_eternalblue", "MS17-010 ailesi"),
+    "CVE-2017-0145": ("exploit/windows/smb/ms17_010_eternalblue", "MS17-010 ailesi"),
+    "CVE-2020-1472": ("auxiliary/admin/dcerpc/cve_2020_1472_zerologon", "ZeroLogon"),
+    "CVE-2020-0796": ("exploit/windows/smb/cve_2020_0796_smbghost", "SMBGhost"),
+    "CVE-2019-0708": ("exploit/windows/rdp/cve_2019_0708_bluekeep_rce", "BlueKeep (RDP)"),
+    "CVE-2021-44228": ("exploit/multi/http/log4shell_header_injection", "Log4Shell"),
+    "CVE-2021-34527": ("exploit/windows/dcerpc/cve_2021_1675_printnightmare", "PrintNightmare"),
+    "CVE-2021-1675": ("exploit/windows/dcerpc/cve_2021_1675_printnightmare", "PrintNightmare"),
+    "CVE-2014-6271": ("exploit/multi/http/apache_mod_cgi_bash_env_exec", "Shellshock"),
+    "CVE-2017-5638": ("exploit/multi/http/struts2_content_type_ognl", "Apache Struts2 OGNL"),
+    "CVE-2018-7600": ("exploit/unix/webapp/drupal_drupalgeddon2", "Drupalgeddon2"),
+    "CVE-2019-19781": ("exploit/linux/http/citrix_dir_traversal_rce", "Citrix ADC"),
+    "CVE-2021-26855": ("exploit/windows/http/exchange_proxylogon_rce", "ProxyLogon"),
+    "CVE-2021-34473": ("exploit/windows/http/exchange_proxyshell_rce", "ProxyShell"),
+    "CVE-2022-1388": ("exploit/linux/http/f5_bigip_icontrol_rce", "F5 BIG-IP iControl"),
+}
+
+SQLI_CWES = frozenset({"CWE-89", "CWE-564", "CWE-943"})
+
+
+def msf_module(cve_id: str) -> tuple[str, str] | None:
+    """CVE icin kurasyonlu MSF modulu (yol, not) veya None."""
+    return CVE_TO_MSF.get(str(cve_id).strip().upper())
+
+
+def is_sqli(cwe: list[str] | tuple[str, ...] | None = None, description: str = "") -> bool:
+    """CVE SQL enjeksiyonu sinifinda mi? (sqlmap adimi icin ipucu)."""
+    for raw in cwe or ():
+        if str(raw).strip().upper() in SQLI_CWES:
+            return True
+    text = (description or "").lower()
+    return "sql injection" in text or "sqli" in text
+
+
 @dataclass(frozen=True)
 class TechniqueLink:
     """Bir CVE ile bir ATT&CK/ATLAS teknigi arasinda koprU."""
@@ -189,8 +225,14 @@ def enrich(record: Any, min_confidence: float = 0.0) -> dict[str, Any]:
     """
     links = resolve_record(record, min_confidence=min_confidence)
     runnable = [l.technique for l in links if l.has_playbook]
+    cwe = getattr(record, "cwe", ()) or ()
+    desc = getattr(record, "description", "") or ""
+    module = msf_module(getattr(record, "id", ""))
     return {
         "techniques": [l.to_dict() for l in links],
         "runnable": runnable,
         "top": links[0].to_dict() if links else None,
+        "msf_module": module[0] if module else "",
+        "msf_note": module[1] if module else "",
+        "sqli": is_sqli(cwe, desc),
     }

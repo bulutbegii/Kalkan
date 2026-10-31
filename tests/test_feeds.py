@@ -115,6 +115,35 @@ class TestFeedDaemon(unittest.TestCase):
         self.assertEqual(len(cve_events), 1)
 
 
+class TestSuggestMsfSqli(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        recs = [
+            CveRecord(id="CVE-2017-0144", description="SMB RCE EternalBlue",
+                      cwe=("CWE-20",), base_score=9.3, severity="critical",
+                      kev=True, product="windows", vendor="microsoft"),
+            CveRecord(id="CVE-2024-9001", description="SQL injection in shop",
+                      cwe=("CWE-89",), base_score=8.8, severity="high", product="shop"),
+        ]
+        self.store = _FakeStore(Path(self.tmp.name) / "vuln", recs)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_msf_candidate_from_feed(self):
+        from kalkan.feeds import suggest
+        sugg = suggest.suggest_for_text("windows smb", store=self.store, min_score=0.0)
+        cands = suggest.msf_candidates(sugg)
+        self.assertTrue(cands)
+        self.assertEqual(cands[0].msf_module, "exploit/windows/smb/ms17_010_eternalblue")
+
+    def test_sqli_candidate_from_feed(self):
+        from kalkan.feeds import suggest
+        sugg = suggest.suggest_for_text("shop injection", store=self.store, min_score=0.0)
+        sqli = suggest.sqli_candidates(sugg)
+        self.assertTrue(any(s.cve == "CVE-2024-9001" for s in sqli))
+
+
 class TestNucleiCveId(unittest.TestCase):
     def _cmd(self, args):
         from kalkan.adapters.nuclei import NucleiAdapter

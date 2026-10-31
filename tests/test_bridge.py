@@ -60,6 +60,28 @@ class TestBridge(unittest.TestCase):
         high = bridge.resolve(cwe=["CWE-125"], min_confidence=0.9)
         self.assertEqual(high, [])
 
+    def test_msf_module_known_cve(self):
+        mod = bridge.msf_module("CVE-2017-0144")
+        self.assertIsNotNone(mod)
+        self.assertEqual(mod[0], "exploit/windows/smb/ms17_010_eternalblue")
+
+    def test_msf_module_case_insensitive_and_unknown(self):
+        self.assertIsNotNone(bridge.msf_module("cve-2020-1472"))
+        self.assertIsNone(bridge.msf_module("CVE-2099-99999"))
+
+    def test_is_sqli_by_cwe_and_keyword(self):
+        self.assertTrue(bridge.is_sqli(cwe=["CWE-89"]))
+        self.assertTrue(bridge.is_sqli(cwe=[], description="Blind SQL injection in login"))
+        self.assertFalse(bridge.is_sqli(cwe=["CWE-79"], description="reflected XSS"))
+
+    def test_enrich_includes_msf_and_sqli(self):
+        rec = CveRecord(id="CVE-2017-0144", description="SMB RCE", cwe=("CWE-20",),
+                        base_score=9.3, severity="critical")
+        info = bridge.enrich(rec)
+        self.assertEqual(info["msf_module"], "exploit/windows/smb/ms17_010_eternalblue")
+        rec2 = CveRecord(id="CVE-2024-0002", description="SQL injection", cwe=("CWE-89",))
+        self.assertTrue(bridge.enrich(rec2)["sqli"])
+
 
 if __name__ == "__main__":
     unittest.main()
