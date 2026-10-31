@@ -78,13 +78,16 @@ Inside the REPL:
 ```
 /target [host]   show/set the session target
 /plan <text>     plan only, do not run
+/arm             ⚔ FULL WEAPON: arm everything, no prompts, full authority
 /cve <CVE-id>    inspect a CVE: score/KEV/CWE + ATT&CK bridge + MSF module
 /exploit <CVE|module> [k=v...] [run]   verify (check) / real exploit (run)
 /allow destructive on    open policy for a real exploit (run)
+/render          render page in Chrome/Edge: Network + XHR/fetch + console + forms
+/js <code>       snippet: run JS in the page (returns the result)
+/shot            screenshot (PNG evidence)
 /risk <level>    risk ceiling (passive|active|intrusive|destructive)
 /auto [on|off]   skip the intrusive approval prompt (careful)
-/arg k=v ...     arm a step argument (e.g. verify=1, module=...)
-/arm             shortcut: verify=1 (arms sqlmap + dalfox + IDOR)
+/arg k=v ...     arm a single step argument (e.g. verify=1, module=...)
 /ozet [on|off]   Turkish model summary after each turn
 /feed [tail|status]   latest feed events
 /scope [add <h>] show scope / add a target
@@ -140,7 +143,8 @@ kalkan coverage     # technique coverage + which tools each playbook needs
 |---|---|---|
 | nmap | port/service scan | active |
 | httpx | tech fingerprint | active |
-| webprobe (built-in) | headers, cookies, CORS, methods, TLS, redirect, **IDOR/BOLA** | active/intrusive |
+| webprobe (built-in) | headers, cookies, CORS, methods, TLS, redirect, **IDOR/BOLA**, **source_recon** | active/intrusive |
+| browser (Chrome/Edge via CDP) | render, Network/XHR, console, **snippet (js_eval)**, **DOM-XSS**, screenshot | active/intrusive |
 | nuclei | template/CVE scan | active |
 | ffuf | content discovery | active |
 | wafw00f | WAF detection | passive |
@@ -193,6 +197,28 @@ kalkan run "sqli on https://site/item?id=1" --arg dump=1 --allow-destructive  # 
 kalkan run "idor test on https://site/api/orders/42" \
     --arg verify=1 --arg cookie="session=A" --arg cookie_b="session=B"
 ```
+
+### Full weapon (`/arm`)
+
+In `chat`, `/arm` arms the whole arsenal at once (SQLi verify+dump, dalfox XSS, IDOR/BOLA, browser DOM-XSS, DOM render), raises the risk ceiling to destructive, enables intrusive+destructive policy and turns on auto-approval — it runs without asking and just prints each step as it executes. Scope stays the single honest gate: destructive steps still need the scope file's `max_risk` set to `destructive` for the authorized target.
+
+### Browser / DevTools (Chrome/Edge via CDP)
+
+The `browser` adapter drives a real headless Chrome/Edge over the Chrome DevTools Protocol with a dependency-free, stdlib-only WebSocket client (no Playwright/Selenium); it falls back to `unavailable` if no browser is installed. From `chat`:
+
+```
+/render    # render the page with JS; collect Network requests, XHR/fetch (dynamic API endpoints), console, forms/links
+/js <code> # DevTools "Snippets": run JS in the page context and get the result back
+/shot      # full-page screenshot saved as PNG evidence
+```
+
+DOM-XSS verification (`dom_xss`) and page render (`dom_render`) are also wired into the `T1190` / `T1592` playbooks (opt-in via `--arg verify=1` / `--arg render=1`).
+
+### Client-side source recon (`source_recon`)
+
+The webprobe `source_recon` capability is the HTTP-level equivalent of the DevTools **Sources** panel: it extracts the page's loaded scripts, downloads JS bundles, reconstructs the original source tree from **source maps** (`.js.map` → `sources` + `sourcesContent`), and scans everything for embedded secrets, API endpoints and exposed repos (`.git`, `.env`). It is wired into the `T1083` playbook.
+
+> **nuclei note:** nuclei runs are bounded so they finish predictably — `high,critical` severity by default (widen with `--arg severity=low,medium,high,critical`), update-check and interactsh disabled, with concurrency/rate-limit/`max-host-error` caps. Earlier the full template set could exceed even a 900 s timeout.
 
 ---
 

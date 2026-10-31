@@ -12,10 +12,14 @@ Yetkinlikler:
   tls_inspect       -> sertifika/surum/sona erme
   redirect_check    -> acik yonlendirme
   idor_probe        -> nesne kimligi numaralandirma (IDOR/BOLA, kirik erisim kontrolu)
+  source_recon      -> DevTools "Sources" karsiligi: JS/asset agaci, source map ile
+                       orijinal kaynak agacini geri kurma, secret/endpoint tarama
 """
 
 from __future__ import annotations
 
+import json
+import re
 import socket
 import ssl
 import time
@@ -23,11 +27,11 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from ..models import Action, ActionResult, Risk
 from ..registry import ToolSpec
-from ._common import base_url, host_of, severity_counts
+from ._common import base_url, host_of, origin, severity_counts
 from .base import Adapter
 
 SECURITY_HEADERS = {
@@ -46,6 +50,25 @@ REDIRECT_PAYLOADS = (
     "//kalkan.invalid/redirect",
     "/\\kalkan.invalid/redirect",
     "https://kalkan.invalid/%2f..%2f",
+)
+
+_SCRIPT_SRC_RE = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+_INLINE_SCRIPT_RE = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.I | re.S)
+_SRCMAP_RE = re.compile(r"//[#@]\s*sourceMappingURL=(\S+)")
+_ENDPOINT_RE = re.compile(r"""['"](/[A-Za-z0-9_][A-Za-z0-9_\-./]{2,}(?:\?[^'"]{0,80})?)['"]""")
+_STATIC_EXT = (".js", ".css", ".png", ".svg", ".jpg", ".jpeg", ".gif", ".webp",
+               ".woff", ".woff2", ".ttf", ".ico", ".map", ".mp4", ".json")
+_SECRET_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("google_api_key", re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
+    ("slack_token", re.compile(r"xox[baprs]-[0-9A-Za-z-]{10,48}")),
+    ("github_token", re.compile(r"gh[pousr]_[0-9A-Za-z]{36,}")),
+    ("jwt", re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
+    ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----")),
+    ("bearer", re.compile(r"(?i)bearer\s+[A-Za-z0-9\-_.=]{20,}")),
+    ("generic_secret", re.compile(
+        r"(?i)(?:api[_-]?key|secret|access[_-]?token|auth[_-]?token|client[_-]?secret|password)"
+        r"[\"'\s]{0,3}[:=][\"'\s]{0,3}([A-Za-z0-9\-_./+]{16,})")),
 )
 
 
@@ -88,10 +111,11 @@ class WebProbeAdapter(Adapter):
             "tls_inspect",
             "redirect_check",
             "idor_probe",
+            "source_recon",
         ),
         risk=Risk.ACTIVE,
         binary=None,
-        description="Yerleşik HTTP/TLS denetimleri (başlık, CORS, çerez, yöntem, sertifika, IDOR)",
+        description="Yerleşik HTTP/TLS denetimleri (başlık, CORS, çerez, yöntem, sertifika, IDOR, kaynak keşfi)",
     )
 
     def command(self, action: Action) -> list[str]:
@@ -103,6 +127,7 @@ class WebProbeAdapter(Adapter):
             "tls_inspect": "TLS",
             "redirect_check": "GET",
             "idor_probe": "GET(enum)",
+            "source_recon": "GET(sources)",
         }.get(action.capability, "GET")
         return [verb, action.target]
 
@@ -118,6 +143,7 @@ class WebProbeAdapter(Adapter):
         follow: bool = False,
         insecure: bool = False,
         timeout: int = 10,
+        read_bytes: int = 65536,
     ) -> HttpResponse:
         handlers: list[Any] = []
         if not follow:
@@ -136,14 +162,14 @@ class WebProbeAdapter(Adapter):
                     url=url,
                     status=getattr(resp, "status", 0) or resp.getcode(),
                     headers=list(resp.headers.items()),
-                    body=resp.read(65536).decode("utf-8", errors="replace"),
+                    body=resp.read(read_bytes).decode("utf-8", errors="replace"),
                 )
         except urllib.error.HTTPError as exc:
             return HttpResponse(
                 url=url,
                 status=exc.code,
                 headers=list(exc.headers.items()) if exc.headers else [],
-                body=exc.read(65536).decode("utf-8", errors="replace") if exc.fp else "",
+                body=exc.read(read_bytes).decode("utf-8", errors="replace") if exc.fp else "",
             )
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
@@ -161,6 +187,7 @@ class WebProbeAdapter(Adapter):
             "tls_inspect": self._tls,
             "redirect_check": self._redirect,
             "idor_probe": self._idor,
+            "source_recon": self._source_recon,
         }.get(action.capability)
         if handler is None:
             return ActionResult(action=action, status="error", detail="bilinmeyen yetenek")
@@ -692,6 +719,107 @@ class WebProbeAdapter(Adapter):
             "baseline_status": baseline.status,
             "vulnerable": any(f["severity"] in ("high", "critical") for f in findings),
             "tested": tested,
+            "findings": findings,
+        }
+
+    def _source_recon(self, action: Action) -> dict[str, Any]:
+        """Sayfanin yukledigi JS/asset agacini cikarir, source map'lerden
+        orijinal kaynak agacini (ve icerigini) geri kurar ve toplanan tum
+        kaynakta gomulu sir / endpoint / acikta kalan kaynak deposu arar.
+
+        Tarayicisiz calisir (yalnizca HTTP GET). JS ile DINAMIK enjekte edilen
+        script'ler icin browser adaptoru gerekir."""
+        args = action.args
+        insecure = bool(args.get("insecure"))
+        max_js = int(args.get("max_js", 25) or 25)
+        big = int(args.get("max_bytes", 2_000_000) or 2_000_000)
+        base = base_url(action.target)
+        root = origin(action.target)
+        host = host_of(action.target)
+
+        home = self._request(base, insecure=insecure, read_bytes=big)
+        if home.error:
+            return {"error": home.error, "findings": []}
+        html = home.body
+        inline = _INLINE_SCRIPT_RE.findall(html)
+        js_urls: list[str] = []
+        for s in _SCRIPT_SRC_RE.findall(html):
+            u = urljoin(base + "/", s)
+            if host_of(u) == host and u not in js_urls:
+                js_urls.append(u)
+
+        findings: list[dict[str, Any]] = []
+        corpus: list[tuple[str, str]] = [("<inline>", t) for t in inline]
+        sources_tree: list[str] = []
+
+        for u in js_urls[:max_js]:
+            r = self._request(u, insecure=insecure, read_bytes=big)
+            if r.error or not r.body:
+                continue
+            corpus.append((u, r.body))
+            m = _SRCMAP_RE.search(r.body)
+            map_url = urljoin(u, m.group(1)) if m else (u.split("?", 1)[0] + ".map")
+            if not map_url or map_url.startswith("data:"):
+                continue
+            rm = self._request(map_url, insecure=insecure, read_bytes=big)
+            if rm.error or not rm.body.strip().startswith("{"):
+                continue
+            try:
+                data = json.loads(rm.body)
+            except ValueError:
+                continue
+            srcs_list = data.get("sources") or []
+            contents = data.get("sourcesContent") or []
+            if not srcs_list:
+                continue
+            for i, sp in enumerate(srcs_list):
+                sources_tree.append(str(sp))
+                if i < len(contents) and contents[i]:
+                    corpus.append((str(sp), contents[i]))
+            findings.append({
+                "check": "source_map_exposed", "severity": "medium",
+                "detail": f"source map açık ({map_url.rsplit('/', 1)[-1]}); "
+                          f"{len(srcs_list)} orijinal kaynak dosyası geri kuruldu",
+            })
+
+        for art, sev, why in ((".git/HEAD", "high", ".git deposu açık"),
+                              (".env", "high", ".env dosyası açık"),
+                              (".svn/entries", "medium", ".svn dizini açık")):
+            r = self._request(f"{root}/{art}", insecure=insecure)
+            if r.error or r.status != 200 or not r.body:
+                continue
+            if art == ".git/HEAD" and not r.body.strip().startswith("ref:"):
+                continue
+            findings.append({"check": "exposed_source", "severity": sev,
+                             "detail": f"{why}: /{art}"})
+
+        endpoints: set[str] = set()
+        seen_secret: set[str] = set()
+        for name, text in corpus:
+            for label, pat in _SECRET_PATTERNS:
+                for mm in pat.finditer(text):
+                    snippet = mm.group(0)[:64]
+                    key = f"{label}:{snippet}"
+                    if key in seen_secret:
+                        continue
+                    seen_secret.add(key)
+                    findings.append({
+                        "check": "secret_in_source", "severity": "high",
+                        "detail": f"{label} kaynakta: {snippet}", "location": name,
+                    })
+            for mm in _ENDPOINT_RE.finditer(text):
+                p = mm.group(1)
+                if len(p) < 80 and not p.lower().endswith(_STATIC_EXT):
+                    endpoints.add(p)
+
+        return {
+            "url": base,
+            "scripts": len([c for c in corpus if c[0] not in ("<inline>",) and "://" in c[0]]),
+            "inline_scripts": len(inline),
+            "sources_recovered": len(sources_tree),
+            "sources_tree": sorted(set(sources_tree))[:300],
+            "endpoints": sorted(endpoints)[:80],
+            "vulnerable": any(f["severity"] == "high" for f in findings),
             "findings": findings,
         }
 

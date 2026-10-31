@@ -97,6 +97,8 @@ _KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("exploit", "sömür", "istismar", "msf", "metasploit"), "T1190"),
     (("idor", "bola", "erişim kontrol", "erisim kontrol", "access control",
       "yetkisiz", "nesne referans", "broken access"), "T1190"),
+    (("dosya", "dizin", "directory", "kaynak kod", "source map", "sources",
+      "js tara", "javascript dosya", "gömülü sır", "secret ara", "source"), "T1083"),
     (("shodan", "pasif", "osint", "dışarıdan"), "T1596"),
     (("jailbreak", "prompt injection", "enjeksiyon"), "AML.T0051"),
     (("jailbreak", "kır", "bypass", "kandır"), "AML.T0054"),

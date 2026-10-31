@@ -35,17 +35,21 @@ class NucleiAdapter(Adapter):
                 cmd += ["-tags", args.get("tags", "cve,exposure")]
         else:
             if not ids:
-                cmd += ["-severity", args.get("severity", "low,medium,high,critical")]
+                cmd += ["-severity", args.get("severity", "high,critical")]
         if ids:
             cmd += ["-id", ids]
         if args.get("templates"):
             cmd += ["-t", str(args["templates"])]
-        if args.get("rate_limit"):
-            cmd += ["-rl", str(args["rate_limit"])]
         if args.get("exclude_intrusive", True):
             cmd += ["-exclude-tags", "intrusive,dos,fuzz"]
-        cmd += ["-timeout", str(args.get("req_timeout", 10)),
-                "-retries", str(args.get("retries", 1))]
+        cmd += [
+            "-disable-update-check", "-no-interactsh",
+            "-c", str(args.get("concurrency", 50)),
+            "-rl", str(args.get("rate_limit", 150)),
+            "-mhe", str(args.get("max_host_error", 30)),
+            "-timeout", str(args.get("req_timeout", 10)),
+            "-retries", str(args.get("retries", 1)),
+        ]
         return cmd
 
     def run(self, action: Action, timeout: int = 300) -> ActionResult:

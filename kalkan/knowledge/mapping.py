@@ -170,9 +170,19 @@ _PLAYBOOKS: tuple[Playbook, ...] = (
         steps=(
             Step("service_version", "nmap", Risk.ACTIVE, {"top_ports": 200}, accepts=("top_ports", "ports")),
             Step("tech_detect", "httpx", Risk.ACTIVE, accepts=("ports", "timeout", "rate_limit")),
+            Step(
+                "dom_render",
+                "browser",
+                Risk.ACTIVE,
+                {"render": None},
+                required=("render",),
+                accepts=("render", "wait", "insecure"),
+                note="--arg render=1 ile açılır; gerçek tarayıcıda (Chrome/Edge) sayfayı "
+                     "render edip Network/XHR-fetch çağrılarını, konsolu ve form/link ağacını toplar",
+            ),
         ),
-        detection="Servis banner'larına yönelik tekrarlı bağlantılar",
-        evidence=("hosts", "technologies"),
+        detection="Servis banner'larına yönelik tekrarlı bağlantılar; headless tarayıcı istekleri",
+        evidence=("hosts", "technologies", "xhr_fetch", "network"),
         rules=("kalkan-recon-003",),
     ),
     Playbook(
@@ -244,6 +254,16 @@ _PLAYBOOKS: tuple[Playbook, ...] = (
                      "yetkisiz erişimi dener (IDOR/BOLA). İki oturum: cookie=... cookie_b=...",
             ),
             Step(
+                "dom_xss",
+                "browser",
+                Risk.INTRUSIVE,
+                {"verify": None},
+                required=("verify",),
+                accepts=("verify", "param", "max_tests", "wait", "insecure"),
+                note="--arg verify=1 ile açılır; GERÇEK tarayıcıda (Chrome/Edge) JS yürütme "
+                     "payload'ı çalışırsa yansıyan/DOM XSS doğrular (konsol işareti)",
+            ),
+            Step(
                 "exploit_check",
                 "msf",
                 Risk.INTRUSIVE,
@@ -294,9 +314,17 @@ _PLAYBOOKS: tuple[Playbook, ...] = (
                 accepts=("wordlist", "extensions", "method", "headers", "rate"),
             ),
             Step("redirect_check", "webprobe", Risk.ACTIVE, accepts=("timeout",)),
+            Step(
+                "source_recon",
+                "webprobe",
+                Risk.ACTIVE,
+                accepts=("insecure", "max_js", "max_bytes", "timeout"),
+                note="DevTools 'Sources' karşılığı: JS/asset ağacı, source map ile "
+                     "orijinal kaynak ağacını geri kurma, gömülü secret/endpoint tarama",
+            ),
         ),
-        detection="Hassas dosya yollarına sıralı erişim; 200 dönen .git/.env",
-        evidence=("findings", "interesting"),
+        detection="Hassas dosya yollarına sıralı erişim; 200 dönen .git/.env; .map istekleri",
+        evidence=("findings", "interesting", "sources_tree", "endpoints"),
         rules=("kalkan-web-004", "kalkan-web-005", "kalkan-web-013"),
     ),
     Playbook(

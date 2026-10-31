@@ -1049,6 +1049,70 @@ def cmd_chat(args) -> int:
         else:
             print("  bilinmeyen: /allow destructive|intrusive [on|off]")
 
+    def run_browser(cap: str, extra: dict[str, Any]) -> None:
+        """Tarayıcı (Chrome/Edge, CDP) yeteneğini doğrudan çalıştır — scope+policy kapılı."""
+        if not state["target"]:
+            print("  önce hedef ver: /target <host>")
+            return
+        act = Action(tool="browser", capability=cap, target=state["target"],
+                     args=extra, risk=Risk.ACTIVE, technique="T1592",
+                     rationale=f"tarayıcı {cap}")
+        plan = Plan(objective=f"browser {cap}", target=state["target"], actions=[act])
+        try:
+            results = executor.run(plan, on_event=_progress_event)
+        except ScopeViolation as exc:
+            print(f"  {ui.red('KAPSAM İHLALİ')}: {exc}", file=sys.stderr)
+            return
+        except PolicyDenied as exc:
+            print(f"  {ui.red('POLİTİKA REDDİ')}: {exc}", file=sys.stderr)
+            return
+        for r in results:
+            p = r.parsed or {}
+            if p.get("error"):
+                print(f"  {ui.red('hata')}: {p['error']}")
+                continue
+            if cap == "js_eval":
+                print(f"  sonuç ({p.get('type', '')}): {p.get('result')}")
+                if p.get("exception"):
+                    print(f"  {ui.red('istisna')}: {p['exception']}")
+            elif cap == "screenshot":
+                if p.get("screenshot_path"):
+                    print(f"  🖼  {p['screenshot_path']}  ({p.get('size_bytes', 0)} B)")
+            else:
+                print(f"  başlık: {ui.bold(p.get('title', '') or '-')}  · "
+                      f"network {p.get('network_count', 0)} · "
+                      f"XHR/fetch {ui.cyan(str(p.get('xhr_fetch_count', 0)))}")
+                for x in (p.get("xhr_fetch") or [])[:15]:
+                    print(ui.dim(f"    {x.get('method', ''):<5} {x.get('status', ''):<4} "
+                                 f"{x.get('url', '')[:92]}"))
+                for f in (p.get("findings") or [])[:5]:
+                    print(ui.dim(f"    [{f.get('severity')}] {f.get('detail', '')}"))
+
+    def arm_all() -> None:
+        """TAM SİLAH: tüm opt-in saldırı adımlarını silahlandır, onayı kaldır,
+        politikayı sonuna kadar aç ve risk tavanını destructive yap. Her adım
+        çalışırken adı yazılır ama SORULMAZ. Kapsam (scope) tek dürüst kapı
+        olarak kalır — yetki beyanı odur."""
+        merged = dict(tok.split("=", 1) for tok in (base.get("arg") or []))
+        merged.update({"verify": "1", "render": "1", "dump": "1", "mode": "run"})
+        base["arg"] = [f"{k}={v}" for k, v in merged.items()]
+        base["max_risk"] = "destructive"
+        state["auto"] = True
+        executor.policy.allow_intrusive = True
+        executor.policy.allow_destructive = True
+        print(f"  {ui.red('⚔ TAM SİLAH')} — her şey silahlandı, onay SORULMAYACAK:")
+        print(f"    silahlar : sqli_check+dump · xss (dalfox) · idor/bola · dom_xss (tarayıcı)"
+              f" · dom_render · msf(modül verilince)")
+        print(f"    yetki    : risk tavanı={ui.risk('destructive')} · auto=AÇIK · "
+              f"intrusive+destructive=AÇIK")
+        print(f"    arglar   : {', '.join(base['arg'])}")
+        print(ui.dim("    her adım çalışırken adı yazılır (sorulmaz). Durdurmak için Ctrl+C."))
+        if executor.scope._max_risk < Risk.DESTRUCTIVE:
+            print(f"  {ui.yellow(ui.SYM['warn'])} kapsam tavanı '{executor.scope._max_risk.label}'. "
+                  f"DESTRUCTIVE adımlar (gerçek exploit / sqli dump) KAPSAM İHLALİ verir.")
+            print(ui.dim("    tam güç için YETKİLİ hedefte scope.json → max_risk=\"destructive\"."))
+        print(ui.dim("    msf exploit_run için modül şart: /cve <CVE> → /exploit <CVE> run"))
+
     print()
     print(ui.rule())
     print(ui.banner(__version__, model_name, online, Path(args.scope).exists()))
@@ -1094,14 +1158,18 @@ def cmd_chat(args) -> int:
                 print("    Ctrl+C           çalışan taramayı durdur (prompt'a döner)")
                 print("    /quit · Ctrl+D   çık")
                 print("  saldırı (tespitle kalma):")
+                print("    /arm             ⚔ TAM SİLAH: her şeyi silahla, sorma, tam yetki")
                 print("    /cve <CVE-id>    CVE'yi incele: skor/KEV/CWE + MSF modülü")
                 print("    /exploit <CVE|modül> [k=v...] [run]  doğrula (check) / exploit_run")
                 print("    /allow destructive on   gerçek exploit (run) için politikayı aç")
+                print("  tarayıcı (Chrome/Edge, DevTools):")
+                print("    /render          sayfayı render et: Network + XHR/fetch + konsol + form")
+                print("    /js <kod>        snippet: hedef sayfada JS çalıştır (sonucu döner)")
+                print("    /shot            ekran görüntüsü (PNG kanıt)")
                 print("  ayar:")
                 print("    /risk <seviye>   tavan risk (passive|active|intrusive|destructive)")
                 print("    /auto [on|off]   intrusive onayını atla (dikkat)")
-                print("    /arg k=v ...     adım argümanı silahla (örn. verify=1, module=...)")
-                print("    /arm             kısayol: verify=1 (sqlmap+dalfox'u açar)")
+                print("    /arg k=v ...     tek tek adım argümanı silahla (örn. verify=1, module=...)")
                 print("    /ozet [on|off]   her turdan sonra Türkçe model özeti")
                 print("    /feed [tail|status]  son besleme olayları")
                 print("    /scope [add <h>] kapsamı göster / hedef ekle")
@@ -1125,13 +1193,14 @@ def cmd_chat(args) -> int:
                 state["auto"] = rest.lower() in ("on", "1", "evet", "aç")
                 print(f"  auto-onay = {'AÇIK (intrusive sormadan çalışır)' if state['auto'] else 'kapalı'}")
                 continue
-            if cmd in ("arg", "arm"):
-                if cmd == "arm" and not rest:
-                    rest = "verify=1"
+            if cmd == "arm":
+                arm_all()
+                continue
+            if cmd == "arg":
                 if not rest:
                     cur = base.get("arg") or []
                     print(f"  aktif arg: {', '.join(cur) if cur else '(yok)'}")
-                    print("  kullanım: /arg key=value [key=value...]  ·  /arg clear")
+                    print("  kullanım: /arg key=value [key=value...]  ·  /arg clear  ·  /arm (tam silah)")
                     continue
                 if rest.strip().lower() == "clear":
                     base["arg"] = []
@@ -1209,6 +1278,18 @@ def cmd_chat(args) -> int:
                 continue
             if cmd == "allow":
                 handle_allow(rest)
+                continue
+            if cmd in ("js", "snippet", "eval"):
+                if not rest:
+                    print("  kullanım: /js <javascript>   (hedef sayfada tarayıcıda çalıştırır)")
+                    continue
+                run_browser("js_eval", {"script": rest})
+                continue
+            if cmd in ("render", "dom", "network", "xhr"):
+                run_browser("dom_render", {"wait": 3})
+                continue
+            if cmd in ("shot", "screenshot", "ss"):
+                run_browser("screenshot", {})
                 continue
             print(f"  bilinmeyen komut: /{cmd}  (/help)")
             continue

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from ..registry import Registry
 from .arjun import ArjunAdapter
+from .browser import BrowserAdapter
 from .dalfox import DalfoxAdapter
 from .ffuf import FfufAdapter
 from .httpx import HttpxAdapter
@@ -36,6 +37,7 @@ __all__ = [
     "DalfoxAdapter",
     "ArjunAdapter",
     "Wafw00fAdapter",
+    "BrowserAdapter",
     "load_default_registry",
 ]
 
@@ -53,6 +55,7 @@ _ADAPTERS = (
     DalfoxAdapter,
     ArjunAdapter,
     Wafw00fAdapter,
+    BrowserAdapter,
 )
 
 
