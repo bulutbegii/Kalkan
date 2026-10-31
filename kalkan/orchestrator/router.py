@@ -257,8 +257,6 @@ class Router:
             m = _TARGET_RE.search(t)
             if m:
                 targets.append(m.group(0))
-            else:
-                notes.append(f"geçersiz hedef yok sayıldı: {t}")
         if not targets and source_text:
             targets = [m.group(0) for m in _TARGET_RE.finditer(source_text)]
         targets = list(dict.fromkeys(targets))

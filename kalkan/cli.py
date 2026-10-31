@@ -171,13 +171,14 @@ def _intent_from_args(args) -> Intent:
     router = Router(endpoint=args.endpoint, model=args.model)
     intent = router.route(args.text or "")
     if args.target:
+        notes = tuple(n for n in intent.notes if "hedef çıkarılamadı" not in n)
         intent = Intent(
             objective=intent.objective,
             targets=(args.target,),
             techniques=intent.techniques,
             rationale=intent.rationale,
             source=intent.source,
-            notes=intent.notes,
+            notes=notes,
         )
     return _augment_from_feed(args, intent)
 
@@ -628,14 +629,18 @@ def cmd_chat(args) -> int:
             shim.arg = list(extra_args)
         print(f"  ... model düşünüyor ({model_name})" if online else "  ... kural tabanlı eşleştirme")
         intent = router.route(text)
+        used_session_target = not intent.targets and bool(state["target"])
         targets = intent.targets or ((state["target"],) if state["target"] else ())
         if not targets:
             print("  hedef yok. '/target <host>' ile belirle ya da metinde hedef ver.")
             return None
+        notes = intent.notes
+        if used_session_target:
+            notes = tuple(n for n in notes if "hedef çıkarılamadı" not in n)
         intent = Intent(
             objective=intent.objective or text, targets=targets,
             techniques=intent.techniques, rationale=intent.rationale,
-            source=intent.source, notes=intent.notes,
+            source=intent.source, notes=notes,
         )
         intent = _augment_from_feed(shim, intent)
         if not intent.techniques:
