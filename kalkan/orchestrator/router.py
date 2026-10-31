@@ -46,21 +46,34 @@ INTENT_SCHEMA = {
 }
 
 SUMMARY_SYSTEM = """Sen bir sizma testi asistanisin. Sana bir plan ve
-calisma sonuclarinin kisa dokumu verilir. Gorevin:
-- 2-4 cumlelik, sade TURKCE bir ozet yaz: ne yapildi, ne bulundu.
-- Ardindan tek satir "Sonraki adim:" ile mantikli bir oneri ver.
+calisma bulgularinin dokumu verilir. SADECE verilen bulgulara dayanarak,
+somut ve bulgu-odakli bir TURKCE ozet yaz. Su yapiyi kullan:
 
-KRITIK kural - durum kodlarini dogru yorumla:
-- "unavailable" = ARAC KURULU DEGIL veya API anahtari yok (orn. nmap PATH'te
-  yok, SHODAN_API_KEY yok). Bu, HEDEFLE ilgili DEGILDIR. Bundan "sunucu
-  yanit vermedi", "hedef erisilemez", "kapali" gibi sonuc CIKARMA. Dogru
-  yorum: "araci kurmak gerekiyor".
+Bulgular:
+- Madde madde ne bulundu: acik port/servis, tespit edilen teknoloji/surum,
+  zafiyet, eksik guvenlik basligi vb. Her maddenin basina onem derecesini
+  koy: [kritik]/[yuksek]/[orta]/[dusuk]/[bilgi].
+
+Gecilebilir (exploitable):
+- Dogrulanmis/istismar edilebilir olanlari ACIKCA yaz: hangi parametre veya
+  uc nokta, varsa hangi CVE. Boyle bir bulgu yoksa "dogrulanmis gecis yok" de.
+
+Eksik / zayif:
+- Eksik veya zayif noktalar (orn. eksik CSP/HSTS basligi, WAF yok, zayif TLS).
+
+Sonraki adim: <tek satir, mantikli oneri>
+
+KRITIK - durum kodlarini dogru yorumla:
+- "unavailable" = ARAC KURULU DEGIL / API anahtari yok (orn. nmap PATH'te yok,
+  SHODAN_API_KEY yok). Bu HEDEFLE ILGISIZDIR. "sunucu yanit vermedi",
+  "erisilemez", "kapali" gibi sonuc CIKARMA; dogru yorum: "araci kurmak gerek".
 - "dry-run" = komut uretildi ama CALISTIRILMADI (simulasyon).
-- "ok" = gercekten calisti; bulgular varsa onlari ozetle.
+- "ok" = gercekten calisti; bulgulari ozetle.
 - "denied" = politika/kapsam reddetti.
 
-Kurallar: SADECE verilen bilgiye dayan, uydurma; komut/komut satiri yazma;
-teknik kimlikleri (T1190 vb.) gerekiyorsa anabilirsin. Kisa ve net ol."""
+Kurallar: uydurma, SADECE verilen bulgulara dayan; komut satiri yazma;
+teknik kimliklerini (T1190, CVE-...) gerekiyorsa an. Kisa ve net; bulgu yoksa
+"belirgin bulgu yok" de."""
 
 SYSTEM_PROMPT = """Sen bir guvenlik orkestrasyon yonlendiricisisin.
 Gorevin: kullanicinin istegini analiz edip SADECE asagidaki katalogdan
@@ -179,7 +192,7 @@ class Router:
             "model": model,
             "stream": False,
             "think": False,
-            "options": {"temperature": 0.3, "num_predict": 320},
+            "options": {"temperature": 0.3, "num_predict": 512},
             "messages": [
                 {"role": "system", "content": SUMMARY_SYSTEM},
                 {"role": "user", "content": prompt},

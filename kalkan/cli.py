@@ -581,25 +581,65 @@ def cmd_chat(args) -> int:
         "arg": [],
     }
 
+    _SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1,
+                 "info": 0, "unknown": 0, "": 0}
+
     def _summary_digest(user_text: str, plan: Plan, results: list) -> str:
-        """Model ozeti icin kompakt plan/sonuc dokumu (token tasarruflu)."""
+        """Model ozeti icin bulgu-odakli plan/sonuc dokumu.
+
+        Sadece sayilari degil, SOMUT bulgulari (acik port, teknoloji, zafiyet
+        parametresi, eksik baslik, CVE) modele verir ki ozet 'nerede ne eksik /
+        ne gecilebilir' diye detaylandirabilsin. Yine de kompakt tutulur:
+        bulgular onem derecesine gore siralanir, adim basina en fazla 6 tanesi.
+        """
         lines = [f"Istek: {user_text}", f"Hedef: {plan.target}",
-                 f"Plan: " + ", ".join(f"{a.tool}.{a.capability}[{a.risk.label}]"
-                                       for a in plan.actions)]
-        lines.append("Sonuclar:")
+                 "Plan: " + ", ".join(f"{a.tool}.{a.capability}[{a.risk.label}]"
+                                       for a in plan.actions),
+                 "Sonuclar ve bulgular:"]
         for r in results:
             a = r.action
-            bit = f"- {a.tool}.{a.capability}: {r.status}"
+            head = f"- {a.tool}.{a.capability}: {r.status}"
             if r.status in ("unavailable", "error", "denied") and r.detail:
-                bit += f" (NEDEN: {r.detail})"
+                head += f" (NEDEN: {r.detail})"
+            lines.append(head)
             p = r.parsed or {}
-            for k in ("count", "open_ports", "vulnerable", "by_severity", "findings"):
-                if k in p:
-                    v = p[k]
-                    if isinstance(v, list):
-                        v = len(v)
-                    bit += f"; {k}={v}"
-            lines.append(bit)
+            if p.get("open_ports"):
+                lines.append("    acik portlar: "
+                             + ", ".join(str(x) for x in p["open_ports"][:20]))
+            techs = p.get("technologies")
+            if techs:
+                names = list(techs) if isinstance(techs, dict) else list(techs)
+                if names:
+                    lines.append(f"    teknoloji: {', '.join(map(str, names[:8]))}")
+            if "protected" in p:
+                det = p.get("detected") or []
+                lines.append(f"    WAF: {', '.join(det) if det else 'YOK (koruma tespit edilmedi)'}")
+            if p.get("vulnerable"):
+                params = p.get("parameters") or []
+                extra = f" (parametre: {', '.join(map(str, params[:5]))})" if params else ""
+                lines.append(f"    GECILEBILIR: zafiyet DOGRULANDI{extra}")
+            if p.get("known_vulns"):
+                lines.append(f"    bilinen CVE: {', '.join(p['known_vulns'][:8])}")
+            findings = p.get("findings") or []
+            findings = sorted(
+                findings,
+                key=lambda f: _SEV_RANK.get(str(f.get("severity", "")).lower(), 0),
+                reverse=True,
+            )
+            for f in findings[:6]:
+                sev = str(f.get("severity", "info")).lower()
+                label = f.get("detail") or f.get("name") or f.get("check") or "bulgu"
+                loc = (f.get("header") or f.get("parameter")
+                       or f.get("matched_at") or f.get("url") or "")
+                cve = f.get("cve")
+                bit = f"    [{sev}] {label}"
+                if cve:
+                    bit += f" ({cve})"
+                if loc and str(loc) not in str(label):
+                    bit += f" -> {loc}"
+                lines.append(bit)
+            if len(findings) > 6:
+                lines.append(f"    (+{len(findings) - 6} bulgu daha)")
         return "\n".join(lines)
 
     def run_plan(plan: Plan, user_text: str = "") -> None:
@@ -617,8 +657,8 @@ def cmd_chat(args) -> int:
             return
         ozet = ""
         if state["summary"] and online:
-            print("\n  ... özet hazırlanıyor")
-            ozet = router.summarize(_summary_digest(user_text, plan, results))
+            print(ui.dim("\n  ... özet hazırlanıyor"))
+            ozet = router.summarize(_summary_digest(user_text, plan, results), timeout=240)
             if ozet:
                 print("  🗒  " + ozet.replace("\n", "\n      "))
         if not state.get("no_report") and not args.dry_run:
