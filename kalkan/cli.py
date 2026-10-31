@@ -488,6 +488,13 @@ def cmd_run(args) -> int:
                 preview = json.dumps(result.parsed, ensure_ascii=False)
                 print(f"    - {preview[:600]}{'...' if len(preview) > 600 else ''}")
         print(f"\n  denetim kaydı: {args.audit}")
+        if not getattr(args, "no_report", False) and not args.dry_run:
+            from . import report
+            try:
+                rp = report.write_report(plan, results, scope=args.scope)
+                print(f"  rapor: {rp}")
+            except Exception as exc:  # noqa: BLE001 - rapor hatası taramayı bozmasın
+                print(f"  rapor yazılamadı: {exc}", file=sys.stderr)
 
     return exit_code
 
@@ -529,7 +536,8 @@ def cmd_chat(args) -> int:
     registry = load_default_registry()
 
     state = {"target": args.target or "", "auto": False,
-             "summary": not getattr(args, "no_summary", False)}
+             "summary": not getattr(args, "no_summary", False),
+             "no_report": getattr(args, "no_report", False)}
 
     def approver(action: Action) -> bool:
         if state["auto"]:
@@ -600,11 +608,19 @@ def cmd_chat(args) -> int:
             if r.parsed:
                 prev = json.dumps(r.parsed, ensure_ascii=False)
                 print(f"    - {prev[:400]}{'...' if len(prev) > 400 else ''}")
+        ozet = ""
         if state["summary"] and online:
             print("\n  ... özet hazırlanıyor")
             ozet = router.summarize(_summary_digest(user_text, plan, results))
             if ozet:
                 print("  🗒  " + ozet.replace("\n", "\n      "))
+        if not state.get("no_report") and not args.dry_run:
+            from . import report
+            try:
+                rp = report.write_report(plan, results, summary=ozet, scope=args.scope)
+                print(f"  rapor: {rp}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  rapor yazılamadı: {exc}", file=sys.stderr)
 
     def make_plan(text: str, extra_args: list[str] | None = None) -> Plan | None:
         shim = _chat_shim(base, text)
@@ -753,7 +769,7 @@ def _home_ns(base: dict[str, Any], **over):
         endpoint=base.get("endpoint", DEFAULT_ENDPOINT), model=base.get("model", DEFAULT_MODEL),
         timeout=300, json=False, yes=False, dry_run=False,
         allow_intrusive=True, allow_destructive=False,
-        from_feed=False, feed_min_score=40.0, arg=[], no_summary=False,
+        from_feed=False, feed_min_score=40.0, arg=[], no_summary=False, no_report=False,
         action=None, risk="passive",
         once=False, max_cycles=None, vuln_interval=None, attack_interval=None,
         atlas_interval=None, days=None, no_kev=False, no_epss=False,
@@ -1288,6 +1304,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--timeout", type=int, default=300)
     p_chat.add_argument("--dry-run", action="store_true", help="komutları üret, çalıştırma")
     p_chat.add_argument("--no-summary", action="store_true", help="tur sonu Türkçe model özetini kapat")
+    p_chat.add_argument("--no-report", action="store_true", help="tarama sonrası .md rapor yazımını kapat")
     p_chat.add_argument("--allow-intrusive", action="store_true", default=True)
     p_chat.add_argument("--allow-destructive", action="store_true")
     p_chat.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
@@ -1315,6 +1332,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--arg", action="append", default=[], metavar="KEY=VALUE",
                        help="adim argumani override'i (tekrarlanabilir); orn. --arg verify=1 "
                             "sqlmap/dalfox'u acar, --arg module=exploit/... msf'i acar")
+        p.add_argument("--no-report", action="store_true", help="tarama sonrası .md rapor yazımını kapat")
         p.add_argument("--tactic", default=None)
         p.add_argument("--target", default=None)
         p.add_argument("--max-risk", default="intrusive", choices=["passive", "active", "intrusive", "destructive"])

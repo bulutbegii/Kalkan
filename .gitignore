@@ -17,6 +17,9 @@ scope.local.json
 .env
 *.env
 
+# Tarama raporları (hedef bilgisi içerir; repoya girmesin)
+reports/
+
 # Editör
 .vscode/
 .idea/

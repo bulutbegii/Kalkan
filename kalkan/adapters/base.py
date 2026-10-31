@@ -7,12 +7,24 @@ kontrollerinden sonra cagirir.
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _stderr_hint(stderr: str) -> str:
+    """stderr'den son anlamlı satırı (ANSI'siz) kısa ipucu olarak çıkar."""
+    for line in reversed((stderr or "").splitlines()):
+        clean = _ANSI.sub("", line).strip()
+        if clean:
+            return clean[:160]
+    return ""
 
 from ..models import Action, ActionResult
 from ..registry import ToolSpec
@@ -86,7 +98,10 @@ class Adapter:
                 stderr=proc.stderr[-20_000:],
                 parsed=parsed,
                 duration_s=duration,
-                detail="" if proc.returncode == 0 else f"çıkış kodu {proc.returncode}",
+                detail="" if proc.returncode == 0
+                else f"çıkış kodu {proc.returncode}" + (
+                    f": {_stderr_hint(proc.stderr)}" if _stderr_hint(proc.stderr) else ""
+                ),
             )
         finally:
             self.cleanup()
