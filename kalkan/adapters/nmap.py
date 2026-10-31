@@ -22,6 +22,8 @@ class NmapAdapter(Adapter):
     def command(self, action: Action) -> list[str]:
         args = action.args
         cmd = ["nmap", "-Pn", "-oX", "-", "--reason"]
+        if action.capability != "host_discovery":
+            cmd += ["-sT"]
         if action.capability in ("service_version", "vuln_script"):
             cmd += ["-sV", "--version-light"]
         if action.capability == "vuln_script":
