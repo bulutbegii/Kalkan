@@ -69,11 +69,39 @@ def _discoveries(results: Iterable[ActionResult]) -> list[str]:
     return lines
 
 
+def _md_cell(text: Any, limit: int = 160) -> str:
+    """Bir degeri Markdown tablo hucresine guvenli hale getir (| ve newline)."""
+    s = str(text or "").replace("|", "\\|").replace("\n", " ").strip()
+    return (s[:limit] + "…") if len(s) > limit else (s or "-")
+
+
+def _decision_log(decisions: list[dict[str, Any]]) -> list[str]:
+    """Ajan karar logunu Markdown tablosu olarak uret.
+
+    Plan tablosundan farki: modelin/kuralin HER adimda NE SECTIGINI ve NEDEN
+    (gerekce + kaynak + sonuc) gosterir -> oturumun denetlenebilir anlatimi."""
+    lines = ["## Ajan Karar Logu", "",
+             "| # | Kaynak | Yetenek.Araç | Risk | Teknik | Durum | Süre | Gerekçe |",
+             "|---|--------|--------------|------|--------|-------|------|---------|"]
+    for d in decisions:
+        src = "model" if d.get("source") == "llm" else "kural"
+        dur = f"{d.get('duration_s', 0):.1f}s"
+        lines.append(
+            f"| {d.get('step', '')} | {src} "
+            f"| {_md_cell(d.get('capability'))}.{_md_cell(d.get('tool'))} "
+            f"| {d.get('risk', '-')} | {d.get('technique') or '-'} "
+            f"| {d.get('status', '-')} | {dur} | {_md_cell(d.get('thought'), 200)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render(target: str, objective: str, actions: list[Action],
            results: list[ActionResult], notes: list[str] | None = None,
            summary: str = "", scope: str = "", when: datetime | None = None,
            loot: list[dict[str, Any]] | None = None,
-           correlation: list[dict[str, Any]] | None = None) -> str:
+           correlation: list[dict[str, Any]] | None = None,
+           decisions: list[dict[str, Any]] | None = None) -> str:
     when = when or datetime.now()
     lines = [
         "# Kalkan Tarama Raporu",
@@ -95,6 +123,9 @@ def render(target: str, objective: str, actions: list[Action],
         args = ", ".join(f"{k}={v}" for k, v in a.args.items() if v not in (None, "")) or "-"
         lines.append(f"| {i} | {a.risk.label} | {a.tool}.{a.capability} | {a.technique or '-'} | {args} |")
     lines.append("")
+
+    if decisions:
+        lines += _decision_log(decisions)
 
     lines += ["## Sonuçlar", ""]
     for r in results:
@@ -174,7 +205,8 @@ def _persist_loot(results: list[ActionResult], target: str, out_dir: Path,
 def write_report(plan: Plan, results: list[ActionResult], *, summary: str = "",
                  scope: str = "", out_dir: str | Path = DEFAULT_DIR,
                  when: datetime | None = None,
-                 correlation: list[dict[str, Any]] | None = None) -> Path:
+                 correlation: list[dict[str, Any]] | None = None,
+                 decisions: list[dict[str, Any]] | None = None) -> Path:
     """Raporu reports/<hedef>_<zaman>.md olarak yaz ve yolunu döndür.
     Gercek istismar ciktilari (loot) ayrica reports/loot/ altina kaydedilir."""
     when = when or datetime.now()
@@ -185,7 +217,7 @@ def write_report(plan: Plan, results: list[ActionResult], *, summary: str = "",
     md = render(
         target=plan.target, objective=plan.objective, actions=plan.actions,
         results=results, notes=plan.notes, summary=summary, scope=scope, when=when,
-        loot=loot, correlation=correlation,
+        loot=loot, correlation=correlation, decisions=decisions,
     )
     fname = f"{_slug(plan.target)}_{stamp}.md"
     path = directory / fname

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from .models import Action, Intent, Plan, Risk
 from .orchestrator import (
     DEFAULT_ENDPOINT,
     DEFAULT_MODEL,
+    AgentLoop,
     Executor,
     Router,
     plan_for_intent,
@@ -408,6 +410,66 @@ def _exploit_plan(
                    rationale="GERÇEK exploit: başarırsa oturum açar"),
         )
     return Plan(objective=f"exploit {module}", target=rhost, actions=actions)
+
+
+def _weapon_class(row: dict[str, Any]) -> str:
+    """Korelasyon satırını saldırı sınıfına eşle: rce (msf) / sqli / web."""
+    if row.get("msf_module"):
+        return "rce"
+    if row.get("sqli"):
+        return "sqli"
+    return "web"
+
+
+def _auto_weapon_plan(target: str, row: dict[str, Any],
+                      mode: str = "check") -> tuple[Plan, str]:
+    """Bir korelasyon satırı (CVE + ürün + sınıf) için UYGUN silahla plan üret.
+
+    Keşiften gelen CVE'yi doğru araca bağlar — kullanıcı aracı/CVE'yi
+    söylemeden: MSF modüllü CVE → msf; SQLi sınıfı → sqlmap; diğer web
+    CVE'si → nuclei -id (şablon kimliği = CVE kimliği). Döner: (plan, silah)."""
+    cve = row.get("cve", "")
+    product = row.get("product", "") or ""
+    note = (f"{product} {cve}").strip() or cve
+    cls = _weapon_class(row)
+    if cls == "rce":
+        return _exploit_plan(target, row["msf_module"], note=f"{note} (MSF)", mode=mode), "msf"
+    if cls == "sqli":
+        actions = [Action(tool="sqlmap", capability="sqli_check", target=target,
+                          args={"verify": "1", "level": 1, "risk": 1},
+                          risk=Risk.INTRUSIVE, technique="T1190",
+                          rationale=f"SQLi doğrula: {note}")]
+        if mode == "run":
+            actions.append(Action(tool="sqlmap", capability="sqli_dump", target=target,
+                          args={"dump": "1", "level": 1, "risk": 1},
+                          risk=Risk.DESTRUCTIVE, technique="T1190",
+                          rationale=f"SQLi veri çek (GERÇEK): {note}"))
+        return Plan(objective=f"sqli {cve}", target=target, actions=actions), "sqlmap"
+    act = Action(tool="nuclei", capability="web_template", target=target,
+                 args={"cve_id": cve}, risk=Risk.ACTIVE, technique="T1190",
+                 rationale=f"CVE doğrula (nuclei -id): {note}")
+    return Plan(objective=f"nuclei {cve}", target=target, actions=[act]), "nuclei"
+
+
+_ATTACK_STEMS = ("sız", "saldır", "saldir", "exploit", "istismar",
+                 "sömür", "somur", "shell")
+_SCAN_STEMS = ("tara", "scan", "tespit", "keşf", "kesf", "incele", "listele",
+               "enumerate", "enum", "plan")
+
+
+def _is_attack_followup(text: str) -> bool:
+    """Metin, önceki keşfe dayalı bir SALDIRI isteği mi (tarama değil)?
+
+    Kullanıcı 'sız' / 'saldır' / 'en kritikten başla' dediğinde, CVE
+    söylemeden otomatik seçimi tetiklemek için. Kök (startswith) eşleşmesi
+    'yetkisiz/sessiz' gibi ekleri yanlışlıkla yakalamaz."""
+    t = text.lower()
+    toks = re.findall(r"[a-zçğıöşü]+", t)
+    if any(tok.startswith(_SCAN_STEMS) for tok in toks):
+        return False
+    if "en kritik" in t or "ele geçir" in t or "ele gecir" in t:
+        return True
+    return any(tok.startswith(_ATTACK_STEMS) for tok in toks)
 
 
 def cmd_scope(args) -> int:
@@ -875,6 +937,173 @@ def _chat_shim(base: dict[str, Any], text: str):
     return ns
 
 
+def _agent_reporter(online: bool):
+    """Ajan olaylarini canli, adim-adim konsola basar.
+
+    "Her adimda bilgi ver": ne denedi, sonuc ne, zafiyetli surum/CVE cikti mi.
+    Emojiler yalnizca UTF konsolda; aksi halde ASCII sembollere duser."""
+    brain = "🧠" if ui.UTF else "*"
+    bullseye = "🎯" if ui.UTF else "!"
+    digest = "≡" if ui.UTF else "="
+
+    def report(e: dict[str, Any]) -> None:
+        kind = e["kind"]
+        if kind == "think":
+            src = "model" if e.get("source") == "llm" else "kural"
+            print(f"\n  {ui.dim(f'{brain} {src}')}: {ui.dim(e['thought'])}")
+        elif kind == "act":
+            a = e["action"]
+            print(f"  {ui.cyan(ui.SYM['run'])} denedim: "
+                  f"{ui.bold(f'{a.tool}.{a.capability}')} {ui.SYM['arrow']} {a.target} "
+                  f"{ui.dim('[' + a.risk.label + ']')}")
+        elif kind == "result":
+            r = e["result"]
+            if r.status == "ok":
+                sym = ui.green(ui.SYM["ok"])
+            elif r.status in ("unavailable", "denied", "dry-run", "aborted"):
+                sym = ui.yellow(ui.SYM["warn"])
+            else:
+                sym = ui.red(ui.SYM["fail"])
+            print(f"    {sym} sonuç: {ui.status(r.status)} {ui.dim(f'({r.duration_s:.1f}s)')}")
+            for f in e["findings"]:
+                print(f"      {ui.SYM['note']} {f}")
+        elif kind == "vuln":
+            for row in e["rows"][:5]:
+                msf = f" {ui.SYM['arrow']} msf: {row['msf_module']}" if row.get("msf_module") else ""
+                print(f"  {ui.red(f'{bullseye} zafiyetli sürüm')}: "
+                      f"{ui.bold(row['cve'])} ({row.get('product') or 'keşif'}, "
+                      f"skor {row['score']}{', KEV' if row.get('kev') else ''}){msf}")
+        elif kind == "interim":
+            step_no = e["step"]
+            src = e.get("source", "kural")
+            body = e["text"].replace("\n", "\n      ")
+            print(f"\n  {ui.blue(f'{digest} ara özet')} "
+                  f"{ui.dim(f'[adım {step_no} · {src}]')}: {body}")
+        elif kind == "note":
+            print(f"  {ui.yellow(ui.SYM['warn'])} {e['text']}")
+        elif kind == "done":
+            print(f"\n  {ui.bold(ui.SYM['dot'] + ' bitti')}: {e['reason']}")
+
+    return report
+
+
+def cmd_agent(args) -> int:
+    """Otonom ajan: hedef ver, gerisini kendi yurutsun.
+
+    Gozlemle -> dusun -> uygula -> raporla dongusu. Model (varsa) siradaki
+    yetenegi secer, yoksa deterministik faz sirasi devreye girer. Kesif ->
+    tespit -> zafiyetli surum korelasyonu -> exploit pivotu. Kapsam + politika
+    + denetim her adimda zorunlu; argumanlar/risk curated playbook'lardan gelir,
+    model asla serbest komut uretmez."""
+    router = Router(endpoint=args.endpoint, model=args.model)
+    model_name, warn = router.resolve_model()
+    if warn:
+        print(f"uyarı: {warn}", file=sys.stderr)
+    online = router.available()
+
+    guard = _scope_guard(args)
+    policy = Policy(allow_intrusive=args.allow_intrusive, allow_destructive=args.allow_destructive)
+    audit = AuditLog(args.audit)
+    registry = load_default_registry()
+
+    target = (args.target or "").strip()
+    objective = (args.objective or "").strip()
+    if not target and objective:
+        from .orchestrator.router import _TARGET_RE
+        m = _TARGET_RE.search(objective)
+        if m:
+            target = m.group(0)
+    if not target:
+        print("hedef yok. kullanım: kalkan agent <hedef> [--objective '...']",
+              file=sys.stderr)
+        return 2
+    if not objective:
+        objective = f"{target} hedefinde zafiyet keşfi, tespit ve doğrulama"
+
+    mode = ("otonom" + (" + YIKICI" if args.allow_destructive else ""))
+    print(ui.rule())
+    print(f"  {ui.bold('KALKAN AJAN')} {ui.dim('(' + mode + ')')}")
+    print(f"  hedef : {ui.cyan(target)}")
+    print(f"  amaç  : {objective}")
+    print(f"  beyin : {model_name if online else 'kural tabanlı (model yok)'}"
+          f"  ·  adım limiti: {args.max_steps}")
+    print(ui.rule())
+
+    loop = AgentLoop(
+        registry, guard, policy, audit, router,
+        reporter=_agent_reporter(online),
+        max_steps=args.max_steps, timeout=args.timeout, dry_run=args.dry_run,
+        summary_every=args.summary_every,
+        smart_summary=not getattr(args, "no_smart_summary", False),
+    )
+    try:
+        state = loop.run(objective, target)
+    except KeyboardInterrupt:
+        print(f"\n  {ui.yellow('durduruldu')} (denetim kaydına yazıldı)")
+        return 130
+
+    print()
+    print(ui.rule())
+    print(f"  {ui.bold('ÖZET')}: {len(state.results)} adım çalıştı")
+    if state.decisions:
+        print(f"  {ui.bold('karar logu')}:")
+        for d in state.decisions:
+            st = d["status"]
+            if st == "ok":
+                sym = ui.green(ui.SYM["ok"])
+            elif st in ("unavailable", "denied", "dry-run", "scope-ihlali", "bos"):
+                sym = ui.yellow(ui.SYM["warn"])
+            else:
+                sym = ui.red(ui.SYM["fail"])
+            src = "model" if d["source"] == "llm" else "kural"
+            tech = f" {ui.dim(d['technique'])}" if d["technique"] else ""
+            print(f"    {sym} {d['step']:>2}. {ui.dim(src)} "
+                  f"{ui.bold(d['capability'])}.{d['tool']} "
+                  f"{ui.dim('[' + d['risk'] + ']')} {ui.SYM['arrow']} {ui.status(st)}{tech}")
+    if state.correlations:
+        tips = correlate.next_steps(state.correlations)
+        for t in tips:
+            print(f"    {ui.SYM['arrow']} {t}")
+    ozet = ""
+    if online and not args.no_summary and state.results:
+        print(ui.dim("\n  ... özet hazırlanıyor"))
+        ozet = router.summarize(_agent_digest(objective, target, state), timeout=240)
+        if ozet:
+            print("  🗒  " + ozet.replace("\n", "\n      "))
+    if not getattr(args, "no_report", False) and not args.dry_run and state.results:
+        from . import report
+        synth = Plan(objective=objective, target=target,
+                     actions=[r.action for r in state.results])
+        try:
+            rp = report.write_report(synth, state.results, summary=ozet,
+                                     scope=args.scope, correlation=state.correlations,
+                                     decisions=state.decisions)
+            print(f"  rapor: {rp}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  rapor yazılamadı: {exc}", file=sys.stderr)
+    return 0
+
+
+def _agent_digest(objective: str, target: str, state) -> str:
+    """Model ozeti icin ajan oturumunun bulgu dokumu."""
+    from .orchestrator.agent import _findings
+    lines = [f"Amac: {objective}", f"Hedef: {target}", "Adimlar ve bulgular:"]
+    for r in state.results:
+        a = r.action
+        head = f"- {a.tool}.{a.capability}: {r.status}"
+        if r.status in ("unavailable", "error", "denied") and r.detail:
+            head += f" (NEDEN: {r.detail})"
+        lines.append(head)
+        for f in _findings(r):
+            lines.append(f"    {f}")
+    if state.correlations:
+        lines.append("Zafiyetli surum/CVE korelasyonu:")
+        for c in state.correlations[:8]:
+            lines.append(f"  - {c['cve']} {c.get('product') or ''} skor {c['score']}"
+                         + (f" msf:{c['msf_module']}" if c.get("msf_module") else ""))
+    return "\n".join(lines)
+
+
 def cmd_chat(args) -> int:
     """Etkilesimli sohbet (REPL): NL yaz -> niyet -> plan -> kapilar -> sonuc.
 
@@ -898,7 +1127,9 @@ def cmd_chat(args) -> int:
     state = {"target": args.target or "", "auto": True,
              "summary": not getattr(args, "no_summary", False),
              "no_report": getattr(args, "no_report", False),
-             "last_exploit": None}
+             "last_exploit": None,
+             "last_correlation": [],
+             "last_results": []}
 
     def approver(action: Action) -> bool:
         if state["auto"]:
@@ -1022,11 +1253,20 @@ def cmd_chat(args) -> int:
         _print_msf_details(results)
         kor = correlate.correlate(results) if not args.dry_run else []
         _print_correlation(kor)
+        if kor:
+            state["last_correlation"] = kor
+            state["last_results"] = results
         for c in kor:
             if c.get("msf_module"):
                 state["last_exploit"] = {"cve": c["cve"], "module": c["msf_module"]}
-                print(ui.dim(f"    → /exploit {c['cve']}  ile bu modülü (check) deneyebilirsin"))
                 break
+        if kor:
+            top = kor[0]
+            w = _weapon_class(top)
+            wn = {"rce": "msf", "sqli": "sqlmap", "web": "nuclei -id"}[w]
+            print(ui.dim(f"    → en kritik: {top['cve']} ({top.get('product') or 'keşif'}, "
+                         f"skor {top['score']}) · otomatik saldırı için: "
+                         f"'sız' de ya da /exploit  (silah: {wn})"))
         if not state.get("no_report") and not args.dry_run:
             from . import report
             try:
@@ -1064,6 +1304,61 @@ def cmd_chat(args) -> int:
         plans = _build_plans(shim, intent)
         return plans[0] if plans else None
 
+    def auto_exploit(rest: str = "") -> None:
+        """Kullanıcı CVE SÖYLEMEDEN saldır: son taramada keşfedilen teknoloji/
+        sürümü ve (varsa) istenen saldırı türünü harmanlayıp EN KRİTİK ilgili
+        CVE'yi KENDİ seçer, uygun silahı (msf/sqlmap/nuclei) bağlar ve çalıştırır.
+
+        'tara → Next.js gördü → sız' akışının karşılığı: en kritik Next.js
+        CVE'sinden başlar; kullanıcı CVE/araç yazmaz."""
+        if not state["target"]:
+            print("  önce hedef ver: /target <host>")
+            return
+        rows = list(state.get("last_correlation") or [])
+        if not rows and state.get("last_results"):
+            rows = correlate.correlate(state["last_results"])
+        toks = rest.lower().split()
+        mode = "run" if "run" in toks else "check"
+        if not rows:
+            le = state.get("last_exploit")
+            if le and le.get("module"):
+                plan = _exploit_plan(state["target"], le["module"],
+                                     note=le["cve"], mode=mode)
+                print(f"  otomatik: {ui.bold(le['cve'])} → {ui.cyan(le['module'])} (msf)")
+                run_plan(plan, f"otomatik exploit {le['cve']}")
+                return
+            print("  keşif yok — önce TARA (ör. 'web zafiyet tara' · 'teknoloji tespit' · 'port tara').")
+            print("  tarama bir teknoloji/sürüm/CVE bulursa en kritik olanı KENDİM seçerim.")
+            return
+        text = rest.lower()
+        pref = None
+        if any(k in text for k in ("sql", "enjeksiyon", "injection")):
+            pref = "sqli"
+        elif any(k in text for k in ("rce", "uzaktan", "komut", "shell", "oturum", "meterpreter")):
+            pref = "rce"
+        pool = [r for r in rows if _weapon_class(r) == pref] if pref else []
+        row = (pool or rows)[0]
+        plan, weapon = _auto_weapon_plan(state["target"], row, mode=mode)
+        kev = ui.red(" KEV") if row.get("kev") else ""
+        prod = row.get("product") or "keşif"
+        act0 = plan.actions[0]
+        print(f"  {ui.bold('otomatik seçim')} — keşiften harmanlandı"
+              + (f" (istek: {pref})" if pref else "") + ":")
+        print(f"    teknoloji/ürün : {ui.cyan(prod)}  →  en kritik {ui.bold(row['cve'])} "
+              f"(skor {row['score']}, {row['tier']}){kev}")
+        print(f"    silah          : {ui.cyan(weapon)}  [{ui.risk(act0.risk.label)}]  "
+              + (ui.red("mod=run (GERÇEK)") if mode == "run" else "mod=check (doğrula)"))
+        if len(rows) > 1:
+            alt = ", ".join(r["cve"] for r in rows[1:4])
+            print(ui.dim(f"    diğer adaylar  : {alt}  (CVE belirtmek için: /exploit <CVE>)"))
+        if weapon == "msf" and mode == "run" and (
+                not executor.policy.allow_destructive
+                or executor.scope._max_risk < Risk.DESTRUCTIVE):
+            print(f"  {ui.yellow(ui.SYM['warn'])} run için: /allow destructive on + "
+                  f"scope max_risk=destructive")
+        state["last_exploit"] = {"cve": row["cve"], "module": row.get("msf_module") or ""}
+        run_plan(plan, f"otomatik exploit {row['cve']} ({prod}) [{weapon}]")
+
     def handle_exploit(rest: str) -> None:
         """CVE/modul -> msf exploit_check (+ 'run' ile exploit_run). Tespitle
         kalma: bulunan zafiyeti dogrula, yetki varsa somur."""
@@ -1087,14 +1382,8 @@ def cmd_chat(args) -> int:
                 print(f"  yok sayıldı (key=value bekleniyor): {kv}")
         note = ""
         if not ident:
-            le = state.get("last_exploit")
-            if not le:
-                print("  kullanım: /exploit <CVE-...|exploit/modül/yolu> [k=v...] [run]")
-                print("  örnek   : /exploit CVE-2017-0144         (sadece doğrula)")
-                print("            /exploit CVE-2017-0144 run lhost=10.10.10.5")
-                print("  not     : tarama bir MSF'li CVE bulursa argümansız /exploit onu dener")
-                return
-            ident, module, note = le["cve"], le["module"], "son korelasyon"
+            auto_exploit(rest)
+            return
         else:
             resolved = _resolve_msf_module(ident)
             if not resolved:
@@ -1280,7 +1569,9 @@ def cmd_chat(args) -> int:
                 print("  saldırı (tespitle kalma):")
                 print("    /arm             ⚔ TAM SİLAH: her şeyi silahla, sorma, tam yetki")
                 print("    /cve <CVE-id>    CVE'yi incele: skor/KEV/CWE + MSF modülü")
-                print("    /exploit <CVE|modül> [k=v...] [run]  doğrula (check) / exploit_run")
+                print("    /exploit [CVE|modül] [k=v...] [run]  CVE ver → doğrula/exploit;")
+                print("                     CVE VERMEZSEN keşiften en kritik CVE'yi kendi seçer")
+                print("    'sız' / 'saldır'  (düz metin) taramadan sonra otomatik saldırıyı tetikler")
                 print("    /allow destructive on   gerçek exploit (run) için politikayı aç")
                 print("  tarayıcı (Chrome/Edge, DevTools):")
                 print("    /render          sayfayı render et: Network + XHR/fetch + konsol + form")
@@ -1412,6 +1703,11 @@ def cmd_chat(args) -> int:
                 run_browser("screenshot", {})
                 continue
             print(f"  bilinmeyen komut: /{cmd}  (/help)")
+            continue
+
+        if _is_attack_followup(line) and (state.get("last_correlation")
+                                          or state.get("last_exploit")):
+            auto_exploit(line)
             continue
 
         try:
@@ -1982,6 +2278,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--audit", default=argparse.SUPPRESS, help="denetim kaydı (global --audit'i ezer)")
     p_chat.set_defaults(func=cmd_chat)
 
+    p_agent = sub.add_parser(
+        "agent",
+        help="otonom ajan: hedef ver, keşif→tespit→exploit döngüsünü kendi yürütsün",
+    )
+    p_agent.add_argument("target", nargs="?", default="", help="hedef host/IP/URL (kapsam içinde)")
+    p_agent.add_argument("--objective", default="", help="serbest amaç metni (örn. 'web zafiyeti bul ve doğrula')")
+    p_agent.add_argument("--max-steps", type=int, default=16, help="en fazla ajan adımı")
+    p_agent.add_argument("--summary-every", type=int, default=4,
+                         help="kaç adımda bir ara özet bas (yeni CVE'de her zaman basar)")
+    p_agent.add_argument("--no-smart-summary", action="store_true",
+                         help="ara özetlerde modeli kullanma (deterministik, hızlı)")
+    p_agent.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    p_agent.add_argument("--model", default=DEFAULT_MODEL)
+    p_agent.add_argument("--timeout", type=int, default=300)
+    p_agent.add_argument("--dry-run", action="store_true", help="komutları üret, çalıştırma")
+    p_agent.add_argument("--no-summary", action="store_true", help="tur sonu model özetini kapat")
+    p_agent.add_argument("--no-report", action="store_true", help="oturum sonu .md rapor yazımını kapat")
+    p_agent.add_argument("--allow-intrusive", action="store_true", default=True,
+                         help="intrusive adımlara izin ver (varsayılan açık)")
+    p_agent.add_argument("--allow-destructive", action="store_true",
+                         help="YIKICI adımlara izin ver (gerçek exploit/dump); tek seferlik opt-in")
+    p_agent.add_argument("--scope", default=argparse.SUPPRESS, help="kapsam dosyası (global --scope'u ezer)")
+    p_agent.add_argument("--audit", default=argparse.SUPPRESS, help="denetim kaydı (global --audit'i ezer)")
+    p_agent.set_defaults(func=cmd_agent)
+
     p_router = sub.add_parser("router", help="modelin niyet çıkarımını gör")
     p_router.add_argument("text")
     p_router.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
@@ -2073,7 +2394,7 @@ def _setup_console() -> None:
 
 _KNOWN_COMMANDS = {
     "scope", "tools", "coverage", "knowledge", "vuln", "feed",
-    "home", "chat", "router", "plan", "run", "audit", "exploit", "navigator",
+    "home", "chat", "agent", "router", "plan", "run", "audit", "exploit", "navigator",
 }
 _GLOBAL_VALUE_OPTS = {"--scope", "--audit"}
 
@@ -2108,6 +2429,20 @@ def main(argv: list[str] | None = None) -> int:
     argv = _inject_default_command(list(argv))
     parser = build_parser()
     args = parser.parse_args(argv)
+    return args.func(args)
+
+
+def agent_main(argv: list[str] | None = None) -> int:
+    """`kalkan-agent` konsol-script giris noktasi: dogrudan otonom ajan.
+
+    `kalkan-agent <hedef> [...]` == `kalkan agent <hedef> [...]`. -h/--help
+    de ajan alt komutunun yardimini gosterir. Boylece ajan, ayri bir uygulama
+    gibi tek komutla calisir; cekirdek `kalkan` CLI'si aynen durur."""
+    _setup_console()
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = build_parser()
+    args = parser.parse_args(["agent", *argv])
     return args.func(args)
 
 

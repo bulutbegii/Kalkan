@@ -214,6 +214,50 @@ class Router:
             return ""
         return (payload.get("message", {}).get("content") or "").strip()
 
+    def complete_json(
+        self,
+        system: str,
+        user: str,
+        schema: dict,
+        timeout: int | None = None,
+    ) -> dict | None:
+        """Katı JSON semasina zorlanmis tek atislik tamamlama.
+
+        Ajan karar dongusu bunu kullanir: modelden serbest metin degil, verilen
+        semaya uyan bir nesne ister (Ollama `format` alani). Model yoksa, yanit
+        vermezse veya cikti JSON degilse None doner; cagiran taraf deterministik
+        yedege duser. Router'in felsefesi burada da gecerli: modelsiz de calisir.
+        """
+        if not self.available():
+            return None
+        model, _ = self.resolve_model()
+        body = {
+            "model": model,
+            "stream": False,
+            "think": False,
+            "format": schema,
+            "options": {"temperature": 0.0, "num_predict": 512},
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        req = urllib.request.Request(
+            f"{self.endpoint}/api/chat",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            content = (payload.get("message", {}).get("content") or "").strip()
+            if not content:
+                return None
+            data = json.loads(content)
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
     def _route_llm(self, text: str) -> Intent:
         model, warn = self.resolve_model()
         catalog = "\n".join(
